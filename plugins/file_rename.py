@@ -229,17 +229,16 @@ async def auto_rename_files(client, message):
 
         # Prepare for upload
         await msg.edit("**Preparing upload...**")
-        caption = await codeflixbots.get_caption(message.chat.id) or f"**{new_filename}**"
-        thumb = await codeflixbots.get_thumbnail(message.chat.id)
+        caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"  # Fixed: was message.chat.id
+        thumb = await codeflixbots.get_thumbnail(user_id)                           # Fixed: was message.chat.id
         thumb_path = None
 
         # Handle thumbnail
-        if thumb:
-            thumb_path = await client.download_media(thumb)
+        if thumb and os.path.exists(thumb):
+            thumb_path = thumb  # Already a local cropped 320x320 file, use directly
         elif media_type == "video" and message.video.thumbs:
             thumb_path = await client.download_media(message.video.thumbs[0].file_id)
-        
-        thumb_path = await process_thumbnail(thumb_path)
+            thumb_path = await process_thumbnail(thumb_path)  # Process only video's auto thumb
 
         # Upload file
         await msg.edit("**Uploading...**")
@@ -268,6 +267,8 @@ async def auto_rename_files(client, message):
         logger.error(f"Processing error: {e}")
         await message.reply_text(f"Error: {str(e)}")
     finally:
-        # Clean up files
-        await cleanup_files(download_path, metadata_path, thumb_path)
+        # Clean up files — but never delete the user's saved thumbnail
+        await cleanup_files(download_path, metadata_path)
+        if thumb_path and thumb_path != thumb:
+            await cleanup_files(thumb_path)  # Only clean up auto-extracted video thumbs
         renaming_operations.pop(file_id, None)
