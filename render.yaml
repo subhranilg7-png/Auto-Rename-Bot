@@ -3,6 +3,7 @@ services:
     plan: free
     name: AutoRenameBot
     env: python
+    pythonVersion: "3.11.0"
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     repo: https://github.com/Codeflix-Bots/AutoRenameBot.git
