@@ -13,7 +13,6 @@ from config import Config
 from aiohttp import web
 from route import web_server
 import pyrogram.utils
-import pyromod
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import os
 import time
