@@ -1,4 +1,10 @@
-import aiohttp, asyncio, warnings, pytz
+import asyncio
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
+import aiohttp, warnings, pytz
 from datetime import datetime, timedelta
 from pytz import timezone
 from pyrogram import Client, __version__
@@ -62,7 +68,7 @@ class Bot(Client):
                     photo=Config.START_PIC,
                     caption=(
                         "**ᴀɴʏᴀ ɪs ʀᴇsᴛᴀʀᴛᴇᴅ ᴀɢᴀɪɴ  !**\n\n"
-                        f"ɪ ᴅɪᴅɴ'ᴛ sʟᴇᴘᴛ sɪɴᴄᴇ​: `{uptime_string}`"
+                        f"ɪ ᴅɪᴅɴ'ᴛ sʟᴇᴘᴛ sɪɴᴄᴇ: `{uptime_string}`"
                     ),
                     reply_markup=InlineKeyboardMarkup(
                         [[
