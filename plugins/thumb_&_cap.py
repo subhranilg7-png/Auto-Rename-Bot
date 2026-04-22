@@ -27,7 +27,7 @@ async def add_caption(client, message):
 
 @Client.on_message(filters.private & filters.command('del_caption'))
 async def delete_caption(client, message):
-    caption = await codeflixbots.get_caption(message.from_user.id)  # Fixed typo: was madflixbotz
+    caption = await codeflixbots.get_caption(message.from_user.id)
     if not caption:
         return await message.reply_text("**You Don't Have Any Caption ❌**")
     await codeflixbots.set_caption(message.from_user.id, caption=None)
@@ -46,8 +46,12 @@ async def see_caption(client, message):
 @Client.on_message(filters.private & filters.command(['view_thumb', 'viewthumb']))
 async def viewthumb(client, message):
     thumb = await codeflixbots.get_thumbnail(message.from_user.id)
-    if thumb:
+    if thumb and os.path.exists(thumb):
         await client.send_photo(chat_id=message.chat.id, photo=thumb)
+    elif thumb:
+        # File was lost after bot restart (ephemeral filesystem)
+        await codeflixbots.set_thumbnail(message.from_user.id, file_id=None)
+        await message.reply_text("**Thumbnail was lost after bot restart ♻️\nPlease send your photo again to re-set it.**")
     else:
         await message.reply_text("**You Don't Have Any Thumbnail ❌**")
 
@@ -56,7 +60,7 @@ async def viewthumb(client, message):
 async def removethumb(client, message):
     thumb = await codeflixbots.get_thumbnail(message.from_user.id)
     if thumb and os.path.exists(thumb):
-        os.remove(thumb)  # Delete the local file from disk too
+        os.remove(thumb)
     await codeflixbots.set_thumbnail(message.from_user.id, file_id=None)
     await message.reply_text("**Thumbnail Deleted Successfully 🗑️**")
 
@@ -64,13 +68,11 @@ async def removethumb(client, message):
 @Client.on_message(filters.private & filters.photo)
 async def addthumbs(client, message):
     mkn = await message.reply_text("Please Wait ...")
-    # Download the photo to disk
+    os.makedirs("downloads", exist_ok=True)
     thumb_path = await client.download_media(
         message,
-        file_name=f"thumb_{message.from_user.id}.jpg"
+        file_name=f"downloads/thumb_{message.from_user.id}.jpg"
     )
-    # Crop to 1:1 square and resize to 320x320
     thumb_path = crop_to_square(thumb_path)
-    # Save the local file path to DB
     await codeflixbots.set_thumbnail(message.from_user.id, file_id=thumb_path)
     await mkn.edit("**Thumbnail Saved Successfully ✅️ (Cropped to 1:1)**")
