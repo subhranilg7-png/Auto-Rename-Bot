@@ -7,5 +7,5 @@ Pillow
 aiohttp
 pytz
 humanize
-pyromod==0.1.4
+pyromod==3.1.6
 ffmpeg-python
