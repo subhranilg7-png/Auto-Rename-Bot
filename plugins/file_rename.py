@@ -72,6 +72,12 @@ def extract_quality(filename):
     logger.warning(f"No quality pattern matched for {filename}")
     return "Unknown"
 
+def sanitize_filename(filename):
+    """Remove special characters that cause filesystem issues"""
+    sanitized = re.sub(r'[<>:"/\\|?*@]', '_', filename)
+    sanitized = sanitized.strip()
+    return sanitized
+
 async def cleanup_files(*paths):
     for path in paths:
         try:
@@ -191,8 +197,11 @@ async def auto_rename_files(client, message):
 
         ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
         new_filename = f"{format_template}{ext}"
-        download_path = f"downloads/{new_filename}"
-        metadata_path = f"metadata/{new_filename}"
+
+        # Sanitize filename to avoid filesystem issues with special chars like @, [], etc.
+        safe_filename = sanitize_filename(new_filename)
+        download_path = f"downloads/{safe_filename}"
+        metadata_path = f"metadata/{safe_filename}"
 
         # Ensure directories exist every time
         os.makedirs("downloads", exist_ok=True)
@@ -209,7 +218,6 @@ async def auto_rename_files(client, message):
             )
 
             # Wait for .temp file to finish
-            # Pyrogram writes to .temp then renames to final when done
             temp_path = (file_path + ".temp") if file_path else (download_path + ".temp")
             wait_count = 0
             while os.path.exists(temp_path) and wait_count < 60:
