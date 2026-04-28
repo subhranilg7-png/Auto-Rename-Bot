@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 # Global dictionary to track ongoing operations
 renaming_operations = {}
 
+# Create required directories on startup
+os.makedirs("downloads", exist_ok=True)
+os.makedirs("metadata", exist_ok=True)
+
 # Enhanced regex patterns for season and episode extraction
 SEASON_EPISODE_PATTERNS = [
     # Standard patterns (S01E02, S01EP02)
@@ -178,6 +182,13 @@ async def auto_rename_files(client, message):
             return
     renaming_operations[file_id] = datetime.now()
 
+    # Initialize all variables upfront to avoid UnboundLocalError in finally
+    download_path = None
+    metadata_path = None
+    thumb_path = None
+    thumb = None
+    msg = None
+
     try:
         # Extract metadata from filename
         season, episode = extract_season_episode(file_name)
@@ -201,9 +212,10 @@ async def auto_rename_files(client, message):
         new_filename = f"{format_template}{ext}"
         download_path = f"downloads/{new_filename}"
         metadata_path = f"metadata/{new_filename}"
-        
-        os.makedirs(os.path.dirname(download_path), exist_ok=True)
-        os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+
+        # Ensure directories exist every time
+        os.makedirs("downloads", exist_ok=True)
+        os.makedirs("metadata", exist_ok=True)
 
         # Download file
         msg = await message.reply_text("**Downloading...**")
@@ -229,16 +241,15 @@ async def auto_rename_files(client, message):
 
         # Prepare for upload
         await msg.edit("**Preparing upload...**")
-        caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"  # Fixed: was message.chat.id
-        thumb = await codeflixbots.get_thumbnail(user_id)                           # Fixed: was message.chat.id
-        thumb_path = None
+        caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
+        thumb = await codeflixbots.get_thumbnail(user_id)
 
         # Handle thumbnail
         if thumb and os.path.exists(thumb):
             thumb_path = thumb  # Already a local cropped 320x320 file, use directly
         elif media_type == "video" and message.video.thumbs:
             thumb_path = await client.download_media(message.video.thumbs[0].file_id)
-            thumb_path = await process_thumbnail(thumb_path)  # Process only video's auto thumb
+            thumb_path = await process_thumbnail(thumb_path)
 
         # Upload file
         await msg.edit("**Uploading...**")
@@ -265,7 +276,11 @@ async def auto_rename_files(client, message):
 
     except Exception as e:
         logger.error(f"Processing error: {e}")
-        await message.reply_text(f"Error: {str(e)}")
+        if msg:
+            try:
+                await msg.edit(f"Error: {str(e)}")
+            except:
+                await message.reply_text(f"Error: {str(e)}")
     finally:
         # Clean up files — but never delete the user's saved thumbnail
         await cleanup_files(download_path, metadata_path)
