@@ -32,33 +32,26 @@ os.makedirs("metadata", exist_ok=True)
 
 # Enhanced regex patterns for season and episode extraction
 SEASON_EPISODE_PATTERNS = [
-    # Standard patterns (S01E02, S01EP02)
     (re.compile(r'S(\d+)(?:E|EP)(\d+)'), ('season', 'episode')),
-    # Patterns with spaces/dashes (S01 E02, S01-EP02)
     (re.compile(r'S(\d+)[\s-]*(?:E|EP)(\d+)'), ('season', 'episode')),
-    # Full text patterns (Season 1 Episode 2)
     (re.compile(r'Season\s*(\d+)\s*Episode\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
-    # Patterns with brackets/parentheses ([S01][E02])
     (re.compile(r'\[S(\d+)\]\[E(\d+)\]'), ('season', 'episode')),
-    # Fallback patterns (S01 13, Episode 13)
     (re.compile(r'S(\d+)[^\d]*(\d+)'), ('season', 'episode')),
     (re.compile(r'(?:E|EP|Episode)\s*(\d+)', re.IGNORECASE), (None, 'episode')),
-    # Final fallback (standalone number)
     (re.compile(r'\b(\d+)\b'), (None, 'episode'))
 ]
 
 # Quality detection patterns
 QUALITY_PATTERNS = [
-    (re.compile(r'\b(\d{3,4}[pi])\b', re.IGNORECASE), lambda m: m.group(1)),  # 1080p, 720p
+    (re.compile(r'\b(\d{3,4}[pi])\b', re.IGNORECASE), lambda m: m.group(1)),
     (re.compile(r'\b(4k|2160p)\b', re.IGNORECASE), lambda m: "4k"),
     (re.compile(r'\b(2k|1440p)\b', re.IGNORECASE), lambda m: "2k"),
     (re.compile(r'\b(HDRip|HDTV)\b', re.IGNORECASE), lambda m: m.group(1)),
     (re.compile(r'\b(4kX264|4kx265)\b', re.IGNORECASE), lambda m: m.group(1)),
-    (re.compile(r'\[(\d{3,4}[pi])\]', re.IGNORECASE), lambda m: m.group(1))  # [1080p]
+    (re.compile(r'\[(\d{3,4}[pi])\]', re.IGNORECASE), lambda m: m.group(1))
 ]
 
 def extract_season_episode(filename):
-    """Extract season and episode numbers from filename"""
     for pattern, (season_group, episode_group) in SEASON_EPISODE_PATTERNS:
         match = pattern.search(filename)
         if match:
@@ -70,7 +63,6 @@ def extract_season_episode(filename):
     return None, None
 
 def extract_quality(filename):
-    """Extract quality information from filename"""
     for pattern, extractor in QUALITY_PATTERNS:
         match = pattern.search(filename)
         if match:
@@ -81,7 +73,6 @@ def extract_quality(filename):
     return "Unknown"
 
 async def cleanup_files(*paths):
-    """Safely remove files if they exist"""
     for path in paths:
         try:
             if path and os.path.exists(path):
@@ -90,10 +81,8 @@ async def cleanup_files(*paths):
             logger.error(f"Error removing {path}: {e}")
 
 async def process_thumbnail(thumb_path):
-    """Process and resize thumbnail image"""
     if not thumb_path or not os.path.exists(thumb_path):
         return None
-    
     try:
         with Image.open(thumb_path) as img:
             img = img.convert("RGB").resize((320, 320))
@@ -105,7 +94,6 @@ async def process_thumbnail(thumb_path):
         return None
 
 async def add_metadata(input_path, output_path, user_id):
-    """Add metadata to media file using ffmpeg"""
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise RuntimeError("FFmpeg not found in PATH")
@@ -146,14 +134,12 @@ async def add_metadata(input_path, output_path, user_id):
 
 @Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def auto_rename_files(client, message):
-    """Main handler for auto-renaming files"""
     user_id = message.from_user.id
     format_template = await codeflixbots.get_format_template(user_id)
     
     if not format_template:
         return await message.reply_text("Please set a rename format using /autorename")
 
-    # Get file information
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name
@@ -172,11 +158,9 @@ async def auto_rename_files(client, message):
     else:
         return await message.reply_text("Unsupported file type")
 
-    # NSFW check
     if await check_anti_nsfw(file_name, message):
         return await message.reply_text("NSFW content detected")
 
-    # Prevent duplicate processing
     if file_id in renaming_operations:
         if (datetime.now() - renaming_operations[file_id]).seconds < 10:
             return
@@ -190,11 +174,9 @@ async def auto_rename_files(client, message):
     msg = None
 
     try:
-        # Extract metadata from filename
         season, episode = extract_season_episode(file_name)
         quality = extract_quality(file_name)
         
-        # Replace placeholders in template
         replacements = {
             '{season}': season or 'XX',
             '{episode}': episode or 'XX',
@@ -207,7 +189,6 @@ async def auto_rename_files(client, message):
         for placeholder, value in replacements.items():
             format_template = format_template.replace(placeholder, value)
 
-        # Prepare file paths
         ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
         new_filename = f"{format_template}{ext}"
         download_path = f"downloads/{new_filename}"
@@ -226,6 +207,16 @@ async def auto_rename_files(client, message):
                 progress=progress_for_pyrogram,
                 progress_args=("Downloading...", msg, time.time())
             )
+            # Wait for file to be fully written to disk
+            await asyncio.sleep(2)
+
+            # Verify file exists and is not empty
+            if not file_path or not os.path.exists(file_path):
+                raise Exception("Download incomplete — file not found after download")
+
+            if os.path.getsize(file_path) == 0:
+                raise Exception("Download incomplete — file is empty")
+
         except Exception as e:
             await msg.edit(f"Download failed: {e}")
             raise
@@ -285,5 +276,5 @@ async def auto_rename_files(client, message):
         # Clean up files — but never delete the user's saved thumbnail
         await cleanup_files(download_path, metadata_path)
         if thumb_path and thumb_path != thumb:
-            await cleanup_files(thumb_path)  # Only clean up auto-extracted video thumbs
+            await cleanup_files(thumb_path)
         renaming_operations.pop(file_id, None)
