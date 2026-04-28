@@ -207,17 +207,19 @@ async def auto_rename_files(client, message):
                 progress=progress_for_pyrogram,
                 progress_args=("Downloading...", msg, time.time())
             )
-            # Wait for .temp file to finish (Pyrogram renames .temp to final when done)
-temp_path = file_path + ".temp" if file_path else download_path + ".temp"
-wait_count = 0
-while os.path.exists(temp_path) and wait_count < 30:
-    await asyncio.sleep(1)
-    wait_count += 1
 
-if os.path.exists(temp_path):
-    raise Exception("Download timed out — file still incomplete after 30 seconds")
+            # Wait for .temp file to finish
+            # Pyrogram writes to .temp then renames to final when done
+            temp_path = (file_path + ".temp") if file_path else (download_path + ".temp")
+            wait_count = 0
+            while os.path.exists(temp_path) and wait_count < 60:
+                await asyncio.sleep(1)
+                wait_count += 1
 
-await asyncio.sleep(1)
+            if os.path.exists(temp_path):
+                raise Exception("Download timed out — file still incomplete after 60 seconds")
+
+            await asyncio.sleep(1)
 
             # Verify file exists and is not empty
             if not file_path or not os.path.exists(file_path):
