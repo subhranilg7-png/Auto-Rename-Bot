@@ -1,6 +1,6 @@
 import motor.motor_asyncio, datetime, pytz
 from config import Config
-import logging  # Added for logging errors and important information
+import logging
 from .utils import send_log
 
 
@@ -8,11 +8,11 @@ class Database:
     def __init__(self, uri, database_name):
         try:
             self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
-            self._client.server_info()  # This will raise an exception if the connection fails
+            self._client.server_info()
             logging.info("Successfully connected to MongoDB")
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {e}")
-            raise e  # Re-raise the exception after logging it
+            raise e
         self.codeflixbots = self._client[database_name]
         self.col = self.codeflixbots.user
 
@@ -25,6 +25,8 @@ class Database:
             metadata=True,
             metadata_code="Telegram : @Codeflix_Bots",
             format_template=None,
+            bot_mode="autorename",
+            sequence_mode="episode",
             ban_status=dict(
                 is_banned=False,
                 ban_duration=0,
@@ -61,8 +63,7 @@ class Database:
 
     async def get_all_users(self):
         try:
-            all_users = self.col.find({})
-            return all_users
+            return self.col.find({})
         except Exception as e:
             logging.error(f"Error getting all users: {e}")
             return None
@@ -181,6 +182,46 @@ class Database:
 
     async def set_video(self, user_id, video):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'video': video}})
+
+    # ── Bot mode ───────────────────────────────────────────────────────────────
+
+    async def get_bot_mode(self, user_id):
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('bot_mode', 'autorename') if user else 'autorename'
+        except Exception as e:
+            logging.error(f"Error getting bot mode for user {user_id}: {e}")
+            return 'autorename'
+
+    async def set_bot_mode(self, user_id, mode):
+        try:
+            await self.col.update_one(
+                {'_id': int(user_id)},
+                {'$set': {'bot_mode': mode}},
+                upsert=True
+            )
+        except Exception as e:
+            logging.error(f"Error setting bot mode for user {user_id}: {e}")
+
+    # ── Sequence mode ──────────────────────────────────────────────────────────
+
+    async def get_sequence_mode(self, user_id):
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('sequence_mode', 'episode') if user else 'episode'
+        except Exception as e:
+            logging.error(f"Error getting sequence mode for user {user_id}: {e}")
+            return 'episode'
+
+    async def set_sequence_mode(self, user_id, mode):
+        try:
+            await self.col.update_one(
+                {'_id': int(user_id)},
+                {'$set': {'sequence_mode': mode}},
+                upsert=True
+            )
+        except Exception as e:
+            logging.error(f"Error setting sequence mode for user {user_id}: {e}")
 
 
 codeflixbots = Database(Config.DB_URL, Config.DB_NAME)
