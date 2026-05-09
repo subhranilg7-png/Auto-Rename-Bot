@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 renaming_operations = {}
 
 # Pending manual input store
-# { user_id: { 'field': 'episode'/'season'/'quality', 'data': {...} } }
 pending_manual_input = {}
 
 # Create required directories on startup
@@ -37,15 +36,26 @@ os.makedirs("metadata", exist_ok=True)
 # ── Regex patterns ─────────────────────────────────────────────────────────────
 
 SEASON_EPISODE_PATTERNS = [
-    (re.compile(r'S(\d+)(?:E|EP)(\d+)'), ('season', 'episode')),
-    (re.compile(r'S(\d+)[\s-]*(?:E|EP)(\d+)'), ('season', 'episode')),
+    # [E06 - Title] style — episode first before dash
+    (re.compile(r'\[E(\d+)\s*-', re.IGNORECASE), (None, 'episode')),
+    # [S01-04] style
+    (re.compile(r'\[S(\d+)[\s-]+(\d+)\]', re.IGNORECASE), ('season', 'episode')),
+    # S01E02 or S01EP02
+    (re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
+    # S01 E02 or S01-EP02
+    (re.compile(r'S(\d+)[\s-]*(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
+    # Season 1 Episode 2
     (re.compile(r'Season\s*(\d+)\s*Episode\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
-    (re.compile(r'\[S(\d+)\]\[E(\d+)\]'), ('season', 'episode')),
-    (re.compile(r'\[S(\d+)[\s-]*(\d+)\]'), ('season', 'episode')),
-    (re.compile(r'S(\d+)[^\d]*(\d+)'), ('season', 'episode')),
-    (re.compile(r'\[E(\d+)', re.IGNORECASE), (None, 'episode')),
-    (re.compile(r'(?:E|EP|Episode)[\s\-_]*(\d+)', re.IGNORECASE), (None, 'episode')),
-    (re.compile(r'\b(\d+)\b'), (None, 'episode'))
+    # [S01][E02] or [S01][E02]
+    (re.compile(r'\[S(\d+)\]\s*\[?E(\d+)\]?', re.IGNORECASE), ('season', 'episode')),
+    # [S01] alone
+    (re.compile(r'\[S(\d+)\]', re.IGNORECASE), ('season', None)),
+    # S01 alone
+    (re.compile(r'\bS(\d+)\b', re.IGNORECASE), ('season', None)),
+    # E06 or EP06 alone
+    (re.compile(r'(?:^|[\s\[\-_])(?:E|EP)(\d+)(?:$|[\s\]\-_])', re.IGNORECASE), (None, 'episode')),
+    # Episode 06
+    (re.compile(r'Episode\s*(\d+)', re.IGNORECASE), (None, 'episode')),
 ]
 
 QUALITY_PATTERNS = [
@@ -62,16 +72,37 @@ QUALITY_PATTERNS = [
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def extract_season_episode(text):
-    """Extract from filename + caption combined"""
+    """Extract season and episode from combined filename + caption.
+    Runs all patterns to find both season and episode separately."""
     if not text:
         return None, None
+
+    season_found = None
+    episode_found = None
+
     for pattern, (season_group, episode_group) in SEASON_EPISODE_PATTERNS:
+        if season_found and episode_found:
+            break
         match = pattern.search(text)
-        if match:
-            season = match.group(1) if season_group else None
-            episode = match.group(2) if episode_group else match.group(1)
-            return season, episode
-    return None, None
+        if not match:
+            continue
+        if season_group and not season_found:
+            try:
+                season_found = match.group(1)
+            except:
+                pass
+        if episode_group and not episode_found:
+            try:
+                ep_idx = 2 if season_group else 1
+                episode_found = match.group(ep_idx)
+            except:
+                try:
+                    episode_found = match.group(1)
+                except:
+                    pass
+
+    logger.info(f"Detected season={season_found}, episode={episode_found} from: {text[:80]}")
+    return season_found, episode_found
 
 def extract_quality(text):
     if not text:
@@ -114,7 +145,7 @@ async def add_metadata(input_path, output_path, user_id):
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         raise RuntimeError("FFmpeg not found in PATH")
-    
+
     metadata = {
         'title': await codeflixbots.get_title(user_id),
         'artist': await codeflixbots.get_artist(user_id),
@@ -123,7 +154,7 @@ async def add_metadata(input_path, output_path, user_id):
         'audio_title': await codeflixbots.get_audio(user_id),
         'subtitle': await codeflixbots.get_subtitle(user_id)
     }
-    
+
     cmd = [
         ffmpeg,
         '-i', input_path,
@@ -138,20 +169,19 @@ async def add_metadata(input_path, output_path, user_id):
         '-loglevel', 'error',
         output_path
     ]
-    
+
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
     _, stderr = await process.communicate()
-    
+
     if process.returncode != 0:
         raise RuntimeError(f"FFmpeg error: {stderr.decode()}")
 
 async def do_rename(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     """Core rename + upload logic"""
-
     download_path = None
     metadata_path = None
     thumb_path = None
@@ -173,10 +203,7 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
         new_filename = f"{format_template}{ext}"
 
-        # Sanitize for filesystem but keep original for caption
-        safe_filename = sanitize_filename(new_filename)
-
-        # Use unique ID-based path to avoid any special char issues in download
+        # Use unique ID for download path to avoid special char issues
         unique_id = f"{user_id}_{int(time.time())}"
         download_path = f"downloads/{unique_id}{ext}"
         metadata_path = f"metadata/{unique_id}{ext}"
@@ -193,7 +220,7 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
                 progress_args=("Downloading...", msg, time.time())
             )
 
-            # Wait for .temp to disappear
+            # Wait for .temp file to finish
             temp_path = f"{file_path}.temp" if file_path else f"{download_path}.temp"
             wait_count = 0
             while os.path.exists(temp_path) and wait_count < 60:
@@ -212,18 +239,33 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
                 raise Exception("Download incomplete — file is empty")
 
         except Exception as e:
-            await msg.edit(f"Download failed: {e}")
+            if msg:
+                try:
+                    await msg.edit(f"Download failed: {e}")
+                except:
+                    pass
             raise
 
-        await msg.edit("**Processing metadata...**")
+        try:
+            await msg.edit("**Processing metadata...**")
+        except:
+            pass
         try:
             await add_metadata(file_path, metadata_path, user_id)
             file_path = metadata_path
         except Exception as e:
-            await msg.edit(f"Metadata processing failed: {e}")
+            if msg:
+                try:
+                    await msg.edit(f"Metadata processing failed: {e}")
+                except:
+                    pass
             raise
 
-        await msg.edit("**Preparing upload...**")
+        try:
+            await msg.edit("**Preparing upload...**")
+        except:
+            pass
+
         caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
         thumb = await codeflixbots.get_thumbnail(user_id)
 
@@ -233,7 +275,11 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             thumb_path = await client.download_media(message.video.thumbs[0].file_id)
             thumb_path = await process_thumbnail(thumb_path)
 
-        await msg.edit("**Uploading...**")
+        try:
+            await msg.edit("**Uploading...**")
+        except:
+            pass
+
         try:
             upload_params = {
                 'chat_id': message.chat.id,
@@ -250,9 +296,16 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             elif media_type == "audio":
                 await client.send_audio(audio=file_path, file_name=new_filename, **upload_params)
 
-            await msg.delete()
+            try:
+                await msg.delete()
+            except:
+                pass
         except Exception as e:
-            await msg.edit(f"Upload failed: {e}")
+            if msg:
+                try:
+                    await msg.edit(f"Upload failed: {e}")
+                except:
+                    pass
             raise
 
     except Exception as e:
@@ -274,7 +327,8 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
     ['start', 'autorename', 'set_caption', 'del_caption', 'see_caption',
      'view_thumb', 'viewthumb', 'del_thumb', 'delthumb', 'bot_mode',
      'sequence_mode', 'start_sequence', 'end_sequence', 'metadata',
-     'settitle', 'setauthor', 'setartist', 'setaudio', 'setsubtitle', 'setvideo']
+     'settitle', 'setauthor', 'setartist', 'setaudio', 'setsubtitle',
+     'setvideo', 'help', 'start', 'commands', 'donate', 'premium', 'plan']
 ))
 async def handle_manual_input(client, message):
     user_id = message.from_user.id
@@ -287,40 +341,44 @@ async def handle_manual_input(client, message):
     data = pending['data']
     user_input = message.text.strip()
 
-    # Save the manually entered value
     if field == 'episode':
-        data['episode'] = user_input
-        # Check if season is also missing
+        if user_input.lower() != 'skip':
+            data['episode'] = user_input
         if not data.get('season'):
             pending_manual_input[user_id] = {'field': 'season', 'data': data}
-            await message.reply_text("**Could not detect Season number.**\nPlease type the season number (or type `skip` to skip):")
+            await message.reply_text(
+                "**Could not detect Season number.**\n"
+                "Please type the season number (or type `skip`):"
+            )
             return
-        # Check if quality missing
         if not data.get('quality'):
             pending_manual_input[user_id] = {'field': 'quality', 'data': data}
-            await message.reply_text("**Could not detect Quality.**\nPlease type quality (e.g. 720p, 1080p) or type `skip`:")
+            await message.reply_text(
+                "**Could not detect Quality.**\n"
+                "Please type quality e.g. `720p`, `1080p` (or type `skip`):"
+            )
             return
 
     elif field == 'season':
         if user_input.lower() != 'skip':
             data['season'] = user_input
-        # Check if quality missing
         if not data.get('quality'):
             pending_manual_input[user_id] = {'field': 'quality', 'data': data}
-            await message.reply_text("**Could not detect Quality.**\nPlease type quality (e.g. 720p, 1080p) or type `skip`:")
+            await message.reply_text(
+                "**Could not detect Quality.**\n"
+                "Please type quality e.g. `720p`, `1080p` (or type `skip`):"
+            )
             return
 
     elif field == 'quality':
         if user_input.lower() != 'skip':
             data['quality'] = user_input
 
-    # All fields collected — proceed with rename
     del pending_manual_input[user_id]
 
-    orig_message = data['message']
     await do_rename(
         client,
-        orig_message,
+        data['message'],
         user_id,
         data['format_template'],
         data['file_id'],
@@ -338,7 +396,7 @@ async def handle_manual_input(client, message):
 async def auto_rename_files(client, message):
     user_id = message.from_user.id
 
-    # Check bot mode — if sequence mode let sequence.py handle it
+    # If sequence mode let sequence.py handle it
     bot_mode = await codeflixbots.get_bot_mode(user_id)
     if bot_mode == 'sequence':
         return
@@ -370,14 +428,14 @@ async def auto_rename_files(client, message):
             return
     renaming_operations[file_id] = datetime.now()
 
-    # Combine filename + caption for detection
+    # Combine filename + caption for better detection
     caption_text = message.caption or ""
     combined = f"{file_name} {caption_text}"
 
     season, episode = extract_season_episode(combined)
     quality = extract_quality(combined)
 
-    # Check what's missing
+    # Ask user to fill in missing fields
     missing = []
     if not episode:
         missing.append('episode')
@@ -387,7 +445,6 @@ async def auto_rename_files(client, message):
         missing.append('quality')
 
     if missing:
-        # Store data for manual input flow
         pending_manual_input[user_id] = {
             'field': missing[0],
             'data': {
@@ -401,8 +458,11 @@ async def auto_rename_files(client, message):
                 'quality': quality
             }
         }
-
-        field_names = {'episode': 'Episode number', 'season': 'Season number', 'quality': 'Quality (e.g. 720p)'}
+        field_names = {
+            'episode': 'Episode number',
+            'season': 'Season number',
+            'quality': 'Quality (e.g. 720p)'
+        }
         await message.reply_text(
             f"**⚠️ Could not detect {field_names[missing[0]]}.**\n"
             f"Please type it manually (or type `skip` to skip):"
@@ -410,7 +470,6 @@ async def auto_rename_files(client, message):
         renaming_operations.pop(file_id, None)
         return
 
-    # All detected — proceed directly
     await do_rename(
         client, message, user_id, format_template,
         file_id, file_name, media_type,
