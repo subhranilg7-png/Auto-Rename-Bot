@@ -1,5 +1,6 @@
 from pyrogram import Client, filters
 from PIL import Image
+import asyncio
 import os
 from helper.database import codeflixbots
 
@@ -49,7 +50,7 @@ async def viewthumb(client, message):
     if thumb and os.path.exists(thumb):
         await client.send_photo(chat_id=message.chat.id, photo=thumb)
     elif thumb:
-        # File was lost after bot restart (ephemeral filesystem)
+        # File lost after restart
         await codeflixbots.set_thumbnail(message.from_user.id, file_id=None)
         await message.reply_text("**Thumbnail was lost after bot restart ♻️\nPlease send your photo again to re-set it.**")
     else:
@@ -69,10 +70,37 @@ async def removethumb(client, message):
 async def addthumbs(client, message):
     mkn = await message.reply_text("Please Wait ...")
     os.makedirs("downloads", exist_ok=True)
+
     thumb_path = await client.download_media(
         message,
         file_name=f"downloads/thumb_{message.from_user.id}.jpg"
     )
-    thumb_path = crop_to_square(thumb_path)
+
+    # Wait for .temp file to finish
+    temp_path = f"{thumb_path}.temp" if thumb_path else f"downloads/thumb_{message.from_user.id}.jpg.temp"
+    wait_count = 0
+    while os.path.exists(temp_path) and wait_count < 30:
+        await asyncio.sleep(1)
+        wait_count += 1
+
+    await asyncio.sleep(1)
+
+    # Verify file exists and is valid
+    if not thumb_path or not os.path.exists(thumb_path):
+        await mkn.edit("**❌ Thumbnail download failed. Please try again.**")
+        return
+
+    if os.path.getsize(thumb_path) == 0:
+        await mkn.edit("**❌ Thumbnail download failed (empty file). Please try again.**")
+        return
+
+    # Crop to 1:1 square and resize to 320x320
+    try:
+        thumb_path = crop_to_square(thumb_path)
+    except Exception as e:
+        await mkn.edit(f"**❌ Failed to process thumbnail: {e}**")
+        return
+
+    # Save the local file path to DB
     await codeflixbots.set_thumbnail(message.from_user.id, file_id=thumb_path)
     await mkn.edit("**Thumbnail Saved Successfully ✅️ (Cropped to 1:1)**")
