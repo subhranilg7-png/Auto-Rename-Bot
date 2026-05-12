@@ -166,7 +166,7 @@ async def start_sequence(client, message):
 
 # ── File collector in sequence mode ──────────────────────────────────────────
 
-@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
+@Client.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.forwarded))
 async def collect_sequence_file(client, message):
     user_id = message.from_user.id
     bot_mode = await codeflixbots.get_bot_mode(user_id)
