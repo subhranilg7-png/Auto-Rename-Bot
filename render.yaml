@@ -3,7 +3,7 @@ services:
     plan: free
     name: AutoRenameBot
     env: docker
-    repo: https://github.com/Codeflix-Bots/AutoRenameBot.git
+    repo: https://github.com/subhranilg7-png/Auto-Rename-Bot
     branch: main
     dockerfilePath: ./Dockerfile
     autoDeploy: false
@@ -20,5 +20,3 @@ services:
         sync: false
       - key: START_PIC
         sync: false
-      - key: PORT
-        value: 8080
