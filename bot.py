@@ -560,4 +560,130 @@ async def queue_cmd(client, message):
 
 @app.on_message(filters.private & filters.command("cancel_queue"))
 async def cancel_queue_cmd(client, message):
-    user_id = 
+    user_id = message.from_user.id
+    codeflixbots.user_cancel[user_id] = True
+    count = len(codeflixbots.user_queues.get(user_id, []))
+    codeflixbots.user_queues[user_id] = []
+    await message.reply_text(f"**✅ Cancelled {count} files!**")
+
+@app.on_message(filters.private & filters.photo)
+async def add_thumbnail(client, message):
+    msg = await message.reply_text("Processing thumbnail...")
+    os.makedirs("downloads", exist_ok=True)
+    thumb_path = await client.download_media(message, file_name=f"downloads/thumb_{message.from_user.id}.jpg")
+    thumb_path = await process_thumbnail(thumb_path)
+    codeflixbots.set_thumbnail(message.from_user.id, thumb_path)
+    await msg.edit_text("**✅ Thumbnail saved!**")
+
+# ==================== FILE HANDLER ====================
+
+@app.on_message(filters.private & (filters.document | filters.video | filters.audio))
+async def handle_file(client, message):
+    user_id = message.from_user.id
+    
+    format_template = codeflixbots.get_format(user_id)
+    if not format_template:
+        return await message.reply_text("**⚠️ Set format first: /autorename**")
+    
+    if message.document:
+        file_name = message.document.file_name or "file"
+        media_type = "document"
+    elif message.video:
+        file_name = message.video.file_name or "video"
+        media_type = "video"
+    else:
+        file_name = message.audio.file_name or "audio"
+        media_type = "audio"
+    
+    if await check_anti_nsfw(file_name, message):
+        return
+    
+    combined = f"{file_name} {message.caption or ''}"
+    season, episode = extract_season_episode(combined)
+    quality = extract_quality(combined)
+    
+    if not season or not episode or not quality:
+        missing = [x for x in ['Season', 'Episode', 'Quality'] if not locals().get(x.lower())]
+        return await message.reply_text(f"**⚠️ Could not detect:** {', '.join(missing)}\n\nUse format: S01E05 720p")
+    
+    if user_id not in codeflixbots.user_queues:
+        codeflixbots.user_queues[user_id] = []
+    
+    queue_len = len(codeflixbots.user_queues[user_id])
+    for i, task in enumerate(codeflixbots.user_queues[user_id]):
+        task['index'] = i + 1
+        task['total'] = queue_len + 1
+    
+    task = {
+        'client': client, 'message': message, 'user_id': user_id,
+        'file_name': file_name, 'media_type': media_type,
+        'format_template': format_template, 'season': season,
+        'episode': episode, 'quality': quality,
+        'index': queue_len + 1, 'total': queue_len + 1
+    }
+    
+    codeflixbots.user_queues[user_id].append(task)
+    
+    await message.reply_text(
+        f"**📋 Added to queue!**\n\n"
+        f"**Position:** {queue_len + 1}\n"
+        f"**Queue size:** {queue_len + 1}\n"
+        f"**Detected:** S{season}E{episode} | {quality}"
+    )
+    
+    await process_queue(user_id)
+
+# ==================== CALLBACKS ====================
+
+@app.on_callback_query()
+async def callback_handler(client, query):
+    data = query.data
+    user_id = query.from_user.id
+    
+    if data == "help":
+        await query.message.edit_text(HELP_TXT, disable_web_page_preview=True)
+    elif data == "view_queue":
+        queue = codeflixbots.user_queues.get(user_id, [])
+        if not queue:
+            await query.answer("Queue is empty!", show_alert=True)
+        else:
+            text = f"**📋 Queue ({len(queue)} files)**\n\n"
+            for i, task in enumerate(queue[:10], 1):
+                text += f"{i}. `{task['file_name'][:40]}`\n"
+            await query.message.edit_text(text)
+    elif data == "cancel_queue":
+        codeflixbots.user_cancel[user_id] = True
+        count = len(codeflixbots.user_queues.get(user_id, []))
+        codeflixbots.user_queues[user_id] = []
+        await query.message.edit_text(f"**✅ Cancelled {count} files!**")
+    elif data == "metadata_on":
+        codeflixbots.set_metadata(user_id, "On")
+        await query.message.edit_text("**✅ Metadata enabled!**")
+    elif data == "metadata_off":
+        codeflixbots.set_metadata(user_id, "Off")
+        await query.message.edit_text("**✅ Metadata disabled!**")
+
+# ==================== MAIN ====================
+
+async def start_web_server():
+    web_app = await web_server()
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", Config.PORT)
+    await site.start()
+    logger.info(f"Web server started on port {Config.PORT}")
+
+async def main():
+    await app.start()
+    logger.info("Bot started!")
+    await start_web_server()
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    os.makedirs("downloads", exist_ok=True)
+    os.makedirs("metadata", exist_ok=True)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped")
