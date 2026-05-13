@@ -1,30 +1,26 @@
 import os
 import re
 import time
+import shutil
 import asyncio
 import logging
 import json
 from datetime import datetime
+from PIL import Image
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
 
-# ==================== CONFIG ====================
+# ==================== CONFIGURATION ====================
 
 class Config:
     API_ID = int(os.environ.get("API_ID", 0))
     API_HASH = os.environ.get("API_HASH", "")
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-    ADMIN = int(os.environ.get("ADMIN", 0)) if os.environ.get("ADMIN") else None
-    LOG_CHANNEL = os.environ.get("LOG_CHANNEL", None)
+    ADMIN = [int(x) for x in os.environ.get("ADMIN", "").split()] if os.environ.get("ADMIN") else []
+    START_PIC = os.environ.get("START_PIC", "https://graph.org/file/29a3acbbab9de5f45a5fe.jpg")
     PORT = int(os.environ.get("PORT", 8080))
     DB_FILE = "database.json"
-    
-    # Choose mode: "webhook" or "polling"
-    MODE = os.environ.get("MODE", "webhook")
-    
-    # Your Render URL (for webhook mode)
-    RENDER_URL = os.environ.get("RENDER_URL", "")
 
 # ==================== LOGGING ====================
 
@@ -39,6 +35,9 @@ logger = logging.getLogger(__name__)
 class Database:
     def __init__(self):
         self.data = self._load()
+        self.user_queues = {}
+        self.user_processing = {}
+        self.user_cancel = {}
     
     def _load(self):
         if os.path.exists(Config.DB_FILE):
@@ -54,7 +53,7 @@ class Database:
             json.dump(self.data, f, indent=4)
     
     def get_format(self, user_id):
-        return self.data.get(str(user_id), {}).get("format", None)
+        return self.data.get(str(user_id), {}).get("format", "{season} - Episode {episode} [{quality}]")
     
     def set_format(self, user_id, format_str):
         if str(user_id) not in self.data:
@@ -70,17 +69,336 @@ class Database:
             self.data[str(user_id)] = {}
         self.data[str(user_id)]["caption"] = caption
         self._save()
+    
+    def get_thumbnail(self, user_id):
+        path = self.data.get(str(user_id), {}).get("thumbnail", "")
+        if path and os.path.exists(path):
+            return path
+        return None
+    
+    def set_thumbnail(self, user_id, path):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["thumbnail"] = path
+        self._save()
+    
+    def get_metadata(self, user_id):
+        return self.data.get(str(user_id), {}).get("metadata", "Off")
+    
+    def set_metadata(self, user_id, value):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["metadata"] = value
+        self._save()
+    
+    def get_title(self, user_id):
+        return self.data.get(str(user_id), {}).get("title", "Encoded by @Animes_Cruise")
+    
+    def set_title(self, user_id, title):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["title"] = title
+        self._save()
+    
+    def get_author(self, user_id):
+        return self.data.get(str(user_id), {}).get("author", "@Animes_Cruise")
+    
+    def set_author(self, user_id, author):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["author"] = author
+        self._save()
+    
+    def get_artist(self, user_id):
+        return self.data.get(str(user_id), {}).get("artist", "@Animes_Cruise")
+    
+    def set_artist(self, user_id, artist):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["artist"] = artist
+        self._save()
+    
+    def get_audio(self, user_id):
+        return self.data.get(str(user_id), {}).get("audio", "By @Animes_Cruise")
+    
+    def set_audio(self, user_id, audio):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["audio"] = audio
+        self._save()
+    
+    def get_subtitle(self, user_id):
+        return self.data.get(str(user_id), {}).get("subtitle", "By @Animes_Cruise")
+    
+    def set_subtitle(self, user_id, subtitle):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["subtitle"] = subtitle
+        self._save()
+    
+    def get_video(self, user_id):
+        return self.data.get(str(user_id), {}).get("video", "Encoded By @Animes_Cruise")
+    
+    def set_video(self, user_id, video):
+        if str(user_id) not in self.data:
+            self.data[str(user_id)] = {}
+        self.data[str(user_id)]["video"] = video
+        self._save()
+    
+    def total_users_count(self):
+        return len(self.data)
 
 codeflixbots = Database()
 
-# ==================== BOT INSTANCE ====================
+# ==================== UTILITIES ====================
 
-app = Client(
-    "autorename_bot",
-    api_id=Config.API_ID,
-    api_hash=Config.API_HASH,
-    bot_token=Config.BOT_TOKEN
-)
+def humanbytes(size):
+    if not size:
+        return "0 B"
+    power = 2**10
+    n = 0
+    labels = {0: 'B', 1: 'KB', 2: 'MB', 3: 'GB', 4: 'TB'}
+    while size > power:
+        size /= power
+        n += 1
+    return f"{round(size, 2)} {labels[n]}"
+
+async def progress_for_pyrogram(current, total, ud_type, message, start):
+    now = time.time()
+    diff = now - start
+    if round(diff % 5.00) == 0 or current == total:
+        percentage = current * 100 / total
+        speed = current / diff if diff > 0 else 0
+        
+        progress = "".join(["■" for i in range(int(percentage / 5))])
+        progress += "".join(["□" for i in range(20 - int(percentage / 5))])
+        
+        tmp = f"{progress}\n📊 {round(percentage, 2)}%\n📦 {humanbytes(current)} / {humanbytes(total)}\n⚡ {humanbytes(speed)}/s"
+        
+        try:
+            await message.edit_text(
+                text=f"{ud_type}\n\n{tmp}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel_processing")]])
+            )
+        except:
+            pass
+
+async def safe_edit(msg, text):
+    try:
+        await msg.edit(text)
+    except Exception as e:
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            pass
+
+async def cleanup_files(*paths):
+    for path in paths:
+        try:
+            if path and os.path.exists(path):
+                os.remove(path)
+        except:
+            pass
+
+async def process_thumbnail(thumb_path):
+    if not thumb_path or not os.path.exists(thumb_path):
+        return None
+    try:
+        with Image.open(thumb_path) as img:
+            img = img.convert("RGB").resize((320, 320))
+            img.save(thumb_path, "JPEG")
+        return thumb_path
+    except:
+        return None
+
+# ==================== NSFW DETECTION ====================
+
+NSFW_KEYWORDS = [
+    "porn", "sex", "nude", "naked", "hentai", "xxx", "adult",
+    "boobs", "tits", "pussy", "dick", "cock", "ass", "fuck"
+]
+
+async def check_anti_nsfw(new_name, message):
+    lower_name = new_name.lower()
+    for keyword in NSFW_KEYWORDS:
+        if keyword.lower() in lower_name:
+            await message.reply_text("❌ NSFW content detected! File rejected.")
+            return True
+    return False
+
+# ==================== SEASON/EPISODE/QUALITY EXTRACTION ====================
+
+SEASON_EPISODE_PATTERNS = [
+    (re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
+    (re.compile(r'\[S(\d+)[\s-]+(\d+)\]', re.IGNORECASE), ('season', 'episode')),
+    (re.compile(r'Season\s*(\d+)\s*Episode\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
+    (re.compile(r'\bS(\d+)\b', re.IGNORECASE), ('season', None)),
+    (re.compile(r'(?:E|EP)(\d+)', re.IGNORECASE), (None, 'episode')),
+]
+
+QUALITY_PATTERNS = [
+    (re.compile(r'\b(4k|2160p)\b', re.IGNORECASE), "4k"),
+    (re.compile(r'\b(1080p)\b', re.IGNORECASE), "1080p"),
+    (re.compile(r'\b(720p)\b', re.IGNORECASE), "720p"),
+    (re.compile(r'\b(480p)\b', re.IGNORECASE), "480p"),
+]
+
+def extract_season_episode(text):
+    if not text:
+        return None, None
+    season_found = None
+    episode_found = None
+    for pattern, (season_group, episode_group) in SEASON_EPISODE_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        if season_group and not season_found:
+            try:
+                season_found = match.group(1)
+            except:
+                pass
+        if episode_group and not episode_found:
+            try:
+                episode_found = match.group(2 if season_group else 1)
+            except:
+                try:
+                    episode_found = match.group(1)
+                except:
+                    pass
+    return season_found, episode_found
+
+def extract_quality(text):
+    if not text:
+        return None
+    for pattern, quality in QUALITY_PATTERNS:
+        if pattern.search(text):
+            return quality
+    return None
+
+# ==================== METADATA ====================
+
+async def add_metadata(input_path, output_path, user_id):
+    ffmpeg = shutil.which('ffmpeg')
+    if not ffmpeg:
+        return  # Skip metadata if ffmpeg not found
+    
+    metadata_enabled = codeflixbots.get_metadata(user_id)
+    if metadata_enabled != "On":
+        return
+    
+    title = codeflixbots.get_title(user_id)
+    author = codeflixbots.get_author(user_id)
+    
+    cmd = [ffmpeg, '-y', '-i', input_path]
+    if title:
+        cmd.extend(['-metadata', f'title={title}'])
+    if author:
+        cmd.extend(['-metadata', f'artist={author}'])
+    cmd.extend(['-map', '0', '-c', 'copy', '-loglevel', 'error', output_path])
+    
+    try:
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        await process.communicate()
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            return output_path
+    except:
+        pass
+    return input_path
+
+# ==================== FILE PROCESSING ====================
+
+async def process_file(client, message, user_id, format_template, file_name, media_type, season, episode, quality, status_msg):
+    download_path = None
+    
+    try:
+        # Replace placeholders
+        format_template = format_template.replace('{season}', str(season) if season else 'XX')
+        format_template = format_template.replace('{episode}', str(episode) if episode else 'XX')
+        format_template = format_template.replace('{quality}', str(quality) if quality else 'Unknown')
+        
+        ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
+        new_filename = f"{format_template}{ext}"
+        
+        unique_id = f"{user_id}_{int(time.time())}"
+        download_path = f"downloads/{unique_id}{ext}"
+        
+        os.makedirs("downloads", exist_ok=True)
+        
+        await safe_edit(status_msg, "**📥 Downloading...**")
+        
+        file_path = await client.download_media(
+            message,
+            file_name=download_path,
+            progress=progress_for_pyrogram,
+            progress_args=("Downloading...", status_msg, time.time())
+        )
+        
+        if not file_path or not os.path.exists(file_path):
+            raise Exception("Download failed")
+        
+        await safe_edit(status_msg, "**✅ Download complete!**")
+        
+        # Check cancel
+        if codeflixbots.user_cancel.get(user_id, False):
+            raise Exception("Cancelled by user")
+        
+        # Metadata (optional)
+        await safe_edit(status_msg, "**🔧 Processing...**")
+        metadata_path = f"metadata/{unique_id}{ext}"
+        os.makedirs("metadata", exist_ok=True)
+        result_path = await add_metadata(file_path, metadata_path, user_id) or file_path
+        
+        # Upload
+        await safe_edit(status_msg, "**📤 Uploading...**")
+        caption = codeflixbots.get_caption(user_id) or f"**{new_filename}**"
+        caption = caption.replace('{filename}', new_filename).replace('{filesize}', humanbytes(os.path.getsize(result_path)))
+        
+        thumb = codeflixbots.get_thumbnail(user_id)
+        
+        upload_params = {
+            'chat_id': message.chat.id,
+            'caption': caption,
+            'thumb': thumb,
+            'progress': progress_for_pyrogram,
+            'progress_args': ("Uploading...", status_msg, time.time())
+        }
+        
+        if media_type == "document":
+            await client.send_document(document=result_path, file_name=new_filename, **upload_params)
+        elif media_type == "video":
+            await client.send_video(video=result_path, **upload_params)
+        elif media_type == "audio":
+            await client.send_audio(audio=result_path, file_name=new_filename, **upload_params)
+        
+        await safe_edit(status_msg, "**✅ Done!**")
+        await asyncio.sleep(2)
+        await status_msg.delete()
+        
+    except Exception as e:
+        await safe_edit(status_msg, f"**❌ Error:** `{str(e)[:100]}`")
+    finally:
+        await cleanup_files(download_path)
+
+async def process_queue(user_id):
+    if codeflixbots.user_processing.get(user_id, False):
+        return
+    
+    codeflixbots.user_processing[user_id] = True
+    
+    while codeflixbots.user_queues.get(user_id) and not codeflixbots.user_cancel.get(user_id, False):
+        task = codeflixbots.user_queues[user_id].pop(0)
+        
+        status_msg = await task['message'].reply_text(
+            f"**📋 Processing {task['index']}/{task['total']}**\n\n**File:** `{task['file_name'][:50]}`"
+        )
+        
+        await process_file(
+            task['client'], task['message'], task['user_id'],
+            task['format_template'], task['file_name'],
+            task['media_type'], task['season'], task['episode'], 
+            task['quality'], status_msg
+        )
+    
+    codeflixbots.user_processing[user_id] = False
+    codeflixbots.user_cancel[user_id] = False
 
 # ==================== TEXT ====================
 
@@ -93,360 +411,153 @@ START_TXT = """<b>ʜᴇʏ {}! 👋
 /set_caption - Set custom caption
 /queue - View your queue
 /cancel_queue - Clear all pending files
-/help - Get help
-
-🔄 Mode: {}</b>"""
+/help - Get help</b>"""
 
 HELP_TXT = """<b>📖 How to Use:
 
-1️⃣ Set format: /autorename Series S{season}E{episode}
+1️⃣ Set format: /autorename Series S{season}E{episode} {quality}
 2️⃣ Send your file
-3️⃣ Bot auto-renames it
-
-Example filename: Show S01E05 720p.mkv
+3️⃣ Bot auto-detects season/episode/quality
 
 📋 Queue Commands:
 /queue - See pending files
-/cancel_queue - Cancel all files</b>"""
+/cancel_queue - Cancel all files
 
-# ==================== QUEUE SYSTEM ====================
+🖼 Thumbnail:
+Send any photo to set as thumbnail
+/viewthumb - View thumbnail
+/delthumb - Delete thumbnail</b>"""
 
-user_queues = {}
-user_processing = {}
-user_cancel = {}
+# ==================== WEB SERVER ====================
 
-def extract_season_episode(filename):
-    match = re.search(r'S(\d+)[ ._-]?E(\d+)', filename, re.IGNORECASE)
-    if match:
-        return match.group(1), match.group(2)
-    return None, None
+routes = web.RouteTableDef()
 
-async def process_file(client, message, user_id, format_template, file_name, media_type, season, episode, status_msg):
-    download_path = None
-    
-    try:
-        # Replace placeholders
-        new_name = format_template.replace('{season}', season).replace('{episode}', episode)
-        ext = os.path.splitext(file_name)[1]
-        new_filename = f"{new_name}{ext}"
-        
-        download_path = f"downloads/{user_id}_{int(time.time())}{ext}"
-        os.makedirs("downloads", exist_ok=True)
-        
-        await status_msg.edit_text("📥 Downloading...")
-        
-        file_path = await client.download_media(message, file_name=download_path)
-        
-        if not file_path:
-            raise Exception("Download failed")
-        
-        # Check cancel
-        if user_cancel.get(user_id, False):
-            raise Exception("Cancelled by user")
-        
-        await status_msg.edit_text("📤 Uploading...")
-        caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
-        
-        if media_type == "document":
-            await client.send_document(message.chat.id, document=file_path, file_name=new_filename, caption=caption)
-        elif media_type == "video":
-            await client.send_video(message.chat.id, video=file_path, caption=caption)
-        else:
-            await client.send_audio(message.chat.id, audio=file_path, caption=caption)
-        
-        await status_msg.edit_text("✅ Done!")
-        await asyncio.sleep(2)
-        await status_msg.delete()
-        
-    except Exception as e:
-        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
-    finally:
-        if download_path and os.path.exists(download_path):
-            os.remove(download_path)
+@routes.get("/", allow_head=True)
+async def root_route_handler(request):
+    return web.json_response({"status": "running"})
 
-async def process_queue(user_id):
-    if user_processing.get(user_id, False):
-        return
-    
-    user_processing[user_id] = True
-    
-    while user_queues.get(user_id) and not user_cancel.get(user_id, False):
-        task = user_queues[user_id].pop(0)
-        
-        status_msg = await task['message'].reply_text(
-            f"📋 Processing {task['index']}/{task['total']}\n\nFile: {task['file_name'][:50]}"
-        )
-        
-        await process_file(
-            task['client'], task['message'], user_id,
-            task['format_template'], task['file_name'],
-            task['media_type'], task['season'], task['episode'],
-            status_msg
-        )
-    
-    user_processing[user_id] = False
-    user_cancel[user_id] = False
+@routes.get("/health", allow_head=True)
+async def health_route_handler(request):
+    return web.json_response({"status": "healthy"})
 
-# ==================== BOT COMMANDS ====================
+async def web_server():
+    web_app = web.Application()
+    web_app.add_routes(routes)
+    return web_app
+
+# ==================== BOT INSTANCE ====================
+
+app = Client(
+    "autorename_bot",
+    api_id=Config.API_ID,
+    api_hash=Config.API_HASH,
+    bot_token=Config.BOT_TOKEN,
+    workers=100
+)
+
+# ==================== COMMANDS ====================
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
     user = message.from_user
-    mode = Config.MODE.upper()
-    await message.reply_text(
-        START_TXT.format(user.first_name, mode),
+    await message.reply_photo(
+        Config.START_PIC,
+        caption=START_TXT.format(user.mention),
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📖 Help", callback_data="help"),
              InlineKeyboardButton("📋 Queue", callback_data="view_queue")],
             [InlineKeyboardButton("❌ Cancel Queue", callback_data="cancel_queue")]
         ])
     )
-    
-    # Send log to channel
-    if Config.LOG_CHANNEL:
-        try:
-            await client.send_message(
-                Config.LOG_CHANNEL,
-                f"✅ New user started!\nUser: {user.mention}\nID: `{user.id}`\nMode: {mode}"
-            )
-        except:
-            pass
 
 @app.on_message(filters.private & filters.command("help"))
 async def help_cmd(client, message):
-    await message.reply_text(HELP_TXT)
+    await message.reply_text(HELP_TXT, disable_web_page_preview=True)
 
 @app.on_message(filters.private & filters.command("autorename"))
-async def set_format(client, message):
+async def auto_rename_command(client, message):
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return await message.reply_text("Usage: `/autorename Your Format Here`\n\nExample: `/autorename Series S{season}E{episode} [1080p]`")
+        return await message.reply_text("**Usage:** `/autorename Your Format`\n\nExample: `/autorename Series S{season}E{episode} {quality}`")
     
     format_template = parts[1].strip()
-    await codeflixbots.set_format(message.from_user.id, format_template)
-    await message.reply_text(f"✅ Format saved!\n`{format_template}`")
+    codeflixbots.set_format(message.from_user.id, format_template)
+    await message.reply_text(f"**✅ Format saved!**\n\n`{format_template}`")
 
 @app.on_message(filters.private & filters.command("set_caption"))
 async def set_caption(client, message):
     if len(message.command) == 1:
-        return await message.reply_text("Usage: `/set_caption Your caption here`")
+        return await message.reply_text("**Usage:** `/set_caption Your caption`")
     caption = message.text.split(" ", 1)[1]
-    await codeflixbots.set_caption(message.from_user.id, caption)
-    await message.reply_text("✅ Caption saved!")
+    codeflixbots.set_caption(message.from_user.id, caption)
+    await message.reply_text("**✅ Caption saved!**")
+
+@app.on_message(filters.private & filters.command("del_caption"))
+async def del_caption(client, message):
+    codeflixbots.set_caption(message.from_user.id, "")
+    await message.reply_text("**✅ Caption deleted!**")
+
+@app.on_message(filters.private & filters.command(["view_thumb", "viewthumb"]))
+async def view_thumb(client, message):
+    thumb = codeflixbots.get_thumbnail(message.from_user.id)
+    if thumb:
+        await client.send_photo(message.chat.id, thumb)
+    else:
+        await message.reply_text("**No thumbnail set!**")
+
+@app.on_message(filters.private & filters.command(["del_thumb", "delthumb"]))
+async def del_thumb(client, message):
+    thumb = codeflixbots.get_thumbnail(message.from_user.id)
+    if thumb and os.path.exists(thumb):
+        os.remove(thumb)
+    codeflixbots.set_thumbnail(message.from_user.id, "")
+    await message.reply_text("**✅ Thumbnail deleted!**")
+
+@app.on_message(filters.private & filters.command("metadata"))
+async def metadata_cmd(client, message):
+    current = codeflixbots.get_metadata(message.from_user.id)
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"On {'✅' if current == 'On' else ''}", callback_data="metadata_on"),
+         InlineKeyboardButton(f"Off {'✅' if current == 'Off' else ''}", callback_data="metadata_off")]
+    ])
+    await message.reply_text(f"**Metadata: {current}**", reply_markup=buttons)
+
+@app.on_message(filters.private & filters.command("settitle"))
+async def set_title(client, message):
+    if len(message.command) == 1:
+        return await message.reply_text("**Usage:** `/settitle Your Title`")
+    title = message.text.split(" ", 1)[1]
+    codeflixbots.set_title(message.from_user.id, title)
+    await message.reply_text("**✅ Title saved!**")
+
+@app.on_message(filters.private & filters.command("setauthor"))
+async def set_author(client, message):
+    if len(message.command) == 1:
+        return await message.reply_text("**Usage:** `/setauthor Your Author`")
+    author = message.text.split(" ", 1)[1]
+    codeflixbots.set_author(message.from_user.id, author)
+    await message.reply_text("**✅ Author saved!**")
+
+@app.on_message(filters.private & filters.command("setartist"))
+async def set_artist(client, message):
+    if len(message.command) == 1:
+        return await message.reply_text("**Usage:** `/setartist Your Artist`")
+    artist = message.text.split(" ", 1)[1]
+    codeflixbots.set_artist(message.from_user.id, artist)
+    await message.reply_text("**✅ Artist saved!**")
 
 @app.on_message(filters.private & filters.command("queue"))
 async def queue_cmd(client, message):
     user_id = message.from_user.id
-    queue = user_queues.get(user_id, [])
+    queue = codeflixbots.user_queues.get(user_id, [])
     if not queue:
-        return await message.reply_text("📋 Your queue is empty!")
+        return await message.reply_text("**📋 Your queue is empty!**")
     
-    text = f"📋 Queue ({len(queue)} files)\n\n"
+    text = f"**📋 Queue ({len(queue)} files)**\n\n"
     for i, task in enumerate(queue[:10], 1):
-        text += f"{i}. {task['file_name'][:40]}\n   S{task['season']}E{task['episode']}\n\n"
+        text += f"{i}. `{task['file_name'][:40]}`\n   S{task['season']}E{task['episode']} | {task['quality']}\n\n"
     await message.reply_text(text)
 
 @app.on_message(filters.private & filters.command("cancel_queue"))
 async def cancel_queue_cmd(client, message):
-    user_id = message.from_user.id
-    user_cancel[user_id] = True
-    count = len(user_queues.get(user_id, []))
-    user_queues[user_id] = []
-    await message.reply_text(f"✅ Cancelled {count} files!")
-
-@app.on_message(filters.private & (filters.document | filters.video | filters.audio))
-async def handle_file(client, message):
-    user_id = message.from_user.id
-    
-    # Get format template
-    format_template = await codeflixbots.get_format(user_id)
-    if not format_template:
-        return await message.reply_text("⚠️ Please set format first using /autorename")
-    
-    # Get file info
-    if message.document:
-        file_name = message.document.file_name or "file"
-        media_type = "document"
-    elif message.video:
-        file_name = message.video.file_name or "video"
-        media_type = "video"
-    else:
-        file_name = message.audio.file_name or "audio"
-        media_type = "audio"
-    
-    # Extract season and episode
-    season, episode = extract_season_episode(file_name)
-    if not season or not episode:
-        return await message.reply_text("⚠️ Could not detect season/episode!\nUse format: S01E05 in filename")
-    
-    # Add to queue
-    if user_id not in user_queues:
-        user_queues[user_id] = []
-    
-    queue_len = len(user_queues[user_id])
-    for i, task in enumerate(user_queues[user_id]):
-        task['index'] = i + 1
-        task['total'] = queue_len + 1
-    
-    task = {
-        'client': client, 'message': message, 'user_id': user_id,
-        'file_name': file_name, 'media_type': media_type,
-        'format_template': format_template, 'season': season,
-        'episode': episode, 'index': queue_len + 1, 'total': queue_len + 1
-    }
-    
-    user_queues[user_id].append(task)
-    
-    await message.reply_text(
-        f"📋 Added to queue!\n\nPosition: {queue_len + 1}\nQueue size: {queue_len + 1}\nDetected: S{season}E{episode}"
-    )
-    
-    await process_queue(user_id)
-
-@app.on_callback_query()
-async def callback_handler(client, query):
-    data = query.data
-    user_id = query.from_user.id
-    
-    if data == "help":
-        await query.message.edit_text(HELP_TXT)
-    elif data == "view_queue":
-        queue = user_queues.get(user_id, [])
-        if not queue:
-            await query.answer("Queue is empty!", show_alert=True)
-        else:
-            text = f"📋 Queue ({len(queue)} files)\n\n"
-            for i, task in enumerate(queue[:10], 1):
-                text += f"{i}. {task['file_name'][:40]}\n"
-            await query.message.edit_text(text)
-    elif data == "cancel_queue":
-        user_cancel[user_id] = True
-        count = len(user_queues.get(user_id, []))
-        user_queues[user_id] = []
-        await query.message.edit_text(f"✅ Cancelled {count} files!")
-
-# ==================== WEBHOOK SUPPORT ====================
-
-routes = web.RouteTableDef()
-
-@routes.post(f"/webhook/{Config.BOT_TOKEN}")
-async def webhook_handler(request):
-    """Receive updates from Telegram via webhook"""
-    try:
-        data = await request.json()
-        # Process update manually for webhook
-        from pyrogram.types import Update
-        update = Update(**data)
-        await app.process_update(update)
-        return web.Response(status=200)
-    except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return web.Response(status=500)
-
-@routes.get("/")
-@routes.get("/health")
-async def health_check(request):
-    return web.json_response({
-        "status": "running",
-        "mode": Config.MODE,
-        "timestamp": datetime.now().isoformat()
-    })
-
-async def run_web_server():
-    """Start the web server for webhook mode"""
-    web_app = web.Application()
-    web_app.add_routes(routes)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", Config.PORT)
-    await site.start()
-    logger.info(f"Web server started on port {Config.PORT}")
-
-async def setup_webhook():
-    """Set webhook for Telegram"""
-    if not Config.RENDER_URL:
-        logger.warning("RENDER_URL not set, webhook mode may not work")
-        return
-    
-    webhook_url = f"{Config.RENDER_URL}/webhook/{Config.BOT_TOKEN}"
-    try:
-        await app.set_webhook(webhook_url)
-        logger.info(f"Webhook set to {webhook_url}")
-    except Exception as e:
-        logger.error(f"Failed to set webhook: {e}")
-
-async def remove_webhook():
-    """Remove webhook (for polling mode)"""
-    try:
-        await app.delete_webhook()
-        logger.info("Webhook removed")
-    except:
-        pass
-
-# ==================== KEEP-ALIVE FOR POLLING MODE ====================
-
-async def keep_alive():
-    """Ping the server every 4 minutes to keep it awake (for polling mode)"""
-    url = f"http://localhost:{Config.PORT}/health"
-    while True:
-        await asyncio.sleep(240)  # 4 minutes
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                await session.get(url)
-                logger.debug("Keep-alive ping sent")
-        except:
-            pass
-
-async def polling_mode():
-    """Run bot in polling mode with keep-alive"""
-    logger.info("Starting in POLLING mode")
-    await remove_webhook()
-    await run_web_server()
-    asyncio.create_task(keep_alive())
-    
-    # Start polling
-    await app.start()
-    logger.info("Bot started in polling mode")
-    await asyncio.Event().wait()
-
-async def webhook_mode():
-    """Run bot in webhook mode"""
-    logger.info("Starting in WEBHOOK mode")
-    await app.start()
-    await setup_webhook()
-    await run_web_server()
-    logger.info("Bot started in webhook mode")
-    await asyncio.Event().wait()
-
-# ==================== MAIN ====================
-
-async def send_startup_message():
-    """Send startup notification"""
-    if Config.LOG_CHANNEL:
-        try:
-            me = await app.get_me()
-            await app.send_message(
-                Config.LOG_CHANNEL,
-                f"🤖 **Bot Started!**\n\n"
-                f"**Name:** {me.first_name}\n"
-                f"**Username:** @{me.username}\n"
-                f"**Mode:** {Config.MODE.upper()}\n"
-                f"**Time:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        except Exception as e:
-            logger.error(f"Failed to send startup message: {e}")
-
-async def main():
-    os.makedirs("downloads", exist_ok=True)
-    
-    if Config.MODE == "webhook":
-        await webhook_mode()
-    else:
-        await polling_mode()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped")
+    user_id = 
