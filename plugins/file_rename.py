@@ -114,6 +114,31 @@ async def cleanup_files(*paths):
         except Exception as e:
             logger.error(f"Error removing {path}: {e}")
 
+async def wait_for_download(file_path, download_path, timeout=120):
+    """Wait for Pyrogram .temp file to finish downloading"""
+    temp_path = f"{file_path}.temp" if file_path else f"{download_path}.temp"
+    waited = 0
+    while waited < timeout:
+        if not os.path.exists(temp_path):
+            break
+        await asyncio.sleep(2)
+        waited += 2
+
+    if os.path.exists(temp_path):
+        raise Exception(f"Download timed out after {timeout}s — file still incomplete")
+
+    await asyncio.sleep(1)
+
+    if not file_path or not os.path.exists(file_path):
+        raise Exception("Download failed — file not found after completion")
+
+    size = os.path.getsize(file_path)
+    if size == 0:
+        raise Exception("Download failed — file is empty")
+
+    logger.info(f"Download complete: {file_path} ({size} bytes)")
+    return file_path
+
 async def process_thumbnail(thumb_path):
     if not thumb_path or not os.path.exists(thumb_path):
         return None
@@ -213,21 +238,22 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             progress_args=("Downloading...", msg, time.time())
         )
 
-        # Verify download completed successfully
-        if not file_path or not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-            raise Exception("Download failed — file not found or empty")
-        
-        await safe_edit(msg, "**Download complete! ✅**")
+        # Wait for download to fully complete
+        await safe_edit(msg, "**Waiting for download to complete... ⏳**")
+        file_path = await wait_for_download(file_path, download_path)
 
-        # Process metadata — continues with original if fails
+        # Process metadata — stops and tells user if it fails
         await safe_edit(msg, "**Processing metadata... 🔧**")
         try:
             await add_metadata(file_path, metadata_path, user_id)
             file_path = metadata_path
         except Exception as e:
-            logger.error(f"Metadata failed: {e} — uploading without metadata")
-            # Continue with original file if metadata fails
-            file_path = download_path
+            logger.error(f"Metadata failed: {e}")
+            await safe_edit(
+                msg,
+                f"**❌ Metadata processing failed:**\n`{str(e)}`\n\nPlease try again."
+            )
+            return
 
         await safe_edit(msg, "**Preparing upload... 📤**")
         caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
@@ -428,4 +454,4 @@ async def auto_rename_files(client, message):
         client, message, user_id, format_template,
         file_id, file_name, media_type,
         season, episode, quality
-    )
+)
