@@ -1,4 +1,6 @@
-import motor.motor_asyncio, datetime, pytz
+import motor.motor_asyncio
+import datetime
+import pytz
 from config import Config
 import logging
 from .utils import send_log
@@ -13,8 +15,9 @@ class Database:
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {e}")
             raise e
-        self.codeflixbots = self._client[database_name]
-        self.col = self.codeflixbots.user
+        self.db = self._client[database_name]
+        self.col = self.db.user
+        self.processing_col = self.db.processing
 
     def new_user(self, id):
         return dict(
@@ -55,8 +58,7 @@ class Database:
 
     async def total_users_count(self):
         try:
-            count = await self.col.count_documents({})
-            return count
+            return await self.col.count_documents({})
         except Exception as e:
             logging.error(f"Error counting users: {e}")
             return 0
@@ -136,49 +138,49 @@ class Database:
 
     async def get_metadata(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('metadata', "Off")
+        return user.get('metadata', "Off") if user else "Off"
 
     async def set_metadata(self, user_id, metadata):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'metadata': metadata}})
 
     async def get_title(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('title', 'Encoded by @Animes_Cruise')
+        return user.get('title', 'Encoded by @Animes_Cruise') if user else 'Encoded by @Animes_Cruise'
 
     async def set_title(self, user_id, title):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'title': title}})
 
     async def get_author(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('author', '@Animes_Cruise')
+        return user.get('author', '@Animes_Cruise') if user else '@Animes_Cruise'
 
     async def set_author(self, user_id, author):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'author': author}})
 
     async def get_artist(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('artist', '@Animes_Cruise')
+        return user.get('artist', '@Animes_Cruise') if user else '@Animes_Cruise'
 
     async def set_artist(self, user_id, artist):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'artist': artist}})
 
     async def get_audio(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('audio', 'By @Animes_Cruise')
+        return user.get('audio', 'By @Animes_Cruise') if user else 'By @Animes_Cruise'
 
     async def set_audio(self, user_id, audio):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'audio': audio}})
 
     async def get_subtitle(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('subtitle', "By @Animes_Cruise")
+        return user.get('subtitle', 'By @Animes_Cruise') if user else 'By @Animes_Cruise'
 
     async def set_subtitle(self, user_id, subtitle):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'subtitle': subtitle}})
 
     async def get_video(self, user_id):
         user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('video', 'Encoded By @Animes_Cruise')
+        return user.get('video', 'Encoded By @Animes_Cruise') if user else 'Encoded By @Animes_Cruise'
 
     async def set_video(self, user_id, video):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'video': video}})
@@ -189,8 +191,7 @@ class Database:
         try:
             user = await self.col.find_one({'_id': int(user_id)})
             return user.get('bot_mode', 'autorename') if user else 'autorename'
-        except Exception as e:
-            logging.error(f"Error getting bot mode for user {user_id}: {e}")
+        except:
             return 'autorename'
 
     async def set_bot_mode(self, user_id, mode):
@@ -201,7 +202,7 @@ class Database:
                 upsert=True
             )
         except Exception as e:
-            logging.error(f"Error setting bot mode for user {user_id}: {e}")
+            logging.error(f"Error setting bot mode: {e}")
 
     # ── Sequence mode ──────────────────────────────────────────────────────────
 
@@ -209,8 +210,7 @@ class Database:
         try:
             user = await self.col.find_one({'_id': int(user_id)})
             return user.get('sequence_mode', 'episode') if user else 'episode'
-        except Exception as e:
-            logging.error(f"Error getting sequence mode for user {user_id}: {e}")
+        except:
             return 'episode'
 
     async def set_sequence_mode(self, user_id, mode):
@@ -221,7 +221,39 @@ class Database:
                 upsert=True
             )
         except Exception as e:
-            logging.error(f"Error setting sequence mode for user {user_id}: {e}")
+            logging.error(f"Error setting sequence mode: {e}")
+
+    # ── Processing lock (prevents duplicate processing across restarts) ────────
+
+    async def is_processing(self, file_id):
+        try:
+            doc = await self.processing_col.find_one({"_id": file_id})
+            if not doc:
+                return False
+            # Expire after 10 minutes
+            age = (datetime.datetime.utcnow() - doc["time"]).total_seconds()
+            if age > 600:
+                await self.clear_processing(file_id)
+                return False
+            return True
+        except:
+            return False
+
+    async def set_processing(self, file_id):
+        try:
+            await self.processing_col.update_one(
+                {"_id": file_id},
+                {"$set": {"time": datetime.datetime.utcnow()}},
+                upsert=True
+            )
+        except:
+            pass
+
+    async def clear_processing(self, file_id):
+        try:
+            await self.processing_col.delete_one({"_id": file_id})
+        except:
+            pass
 
 
 codeflixbots = Database(Config.DB_URL, Config.DB_NAME)
