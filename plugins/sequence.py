@@ -17,24 +17,20 @@ QUALITY_RANK = {
 }
 
 # ── In-memory collection store ────────────────────────────────────────────────
-# { user_id: [ { 'message': msg, 'season': int, 'episode': int, 'quality': str }, ... ] }
 sequence_collections = {}
 
-# ── Pending manual input store ────────────────────────────────────────────────
-# { user_id: { 'field': 'season'/'episode'/'quality', 'data': {...} } }
-pending_sequence_input = {}
 
+# ── Detection helpers ─────────────────────────────────────────────────────────
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def extract_episode(text):
+def seq_extract_episode(text):
     if not text:
         return None
     patterns = [
-        r'(?:E|EP|Episode)[\s\-_]*(\d+)',
-        r'\[E(\d+)',
-        r'S\d+[\s\-_]*E(\d+)',
-        r'\[S\d+[\s\-]*(\d+)\]',
+        r'\[E(\d+)\s*-',
+        r'S\d+[\s-]*E(\d+)',
+        r'(?:E|EP)(\d+)',
+        r'Episode\s*(\d+)',
+        r'\[S\d+[\s-]+(\d+)\]',
         r'[-_\s](\d{2,3})[-_\s]',
     ]
     for p in patterns:
@@ -43,15 +39,14 @@ def extract_episode(text):
             return int(m.group(1))
     return None
 
-def extract_season(text):
+def seq_extract_season(text):
     if not text:
         return None
     patterns = [
-        r'S(\d+)[\s\-_]*E',
-        r'Season[\s_]*(\d+)',
+        r'S(\d+)[\s-]*E\d+',
         r'\[S(\d+)\]',
-        r'S(\d+)[\s\-_]*\d+',
-        r'S(\d+)',
+        r'Season\s*(\d+)',
+        r'\bS(\d+)\b',
     ]
     for p in patterns:
         m = re.search(p, text, re.IGNORECASE)
@@ -59,35 +54,28 @@ def extract_season(text):
             return int(m.group(1))
     return None
 
-def extract_quality(text):
+def seq_extract_quality(text):
     if not text:
-        return 'Unknown'
+        return 'unknown'
     patterns = [
-        r'\b(4k|2160p)\b',
-        r'\b(2k|1440p)\b',
-        r'\b(1080p)\b',
-        r'\b(720p)\b',
-        r'\b(576p)\b',
-        r'\b(480p)\b',
-        r'\[(4k|2160p|2k|1440p|1080p|720p|576p|480p)\]',
+        (r'\b(4k|2160p)\b', '4k'),
+        (r'\b(2k|1440p)\b', '2k'),
+        (r'\b(1080p)\b', '1080p'),
+        (r'\b(720p)\b', '720p'),
+        (r'\b(576p)\b', '576p'),
+        (r'\b(480p)\b', '480p'),
+        (r'\[(1080p|720p|576p|480p|4k|2160p)\]', None),
     ]
-    for p in patterns:
+    for p, val in patterns:
         m = re.search(p, text, re.IGNORECASE)
         if m:
-            return m.group(1).lower()
-    return 'Unknown'
+            return val if val else m.group(1).lower()
+    return 'unknown'
 
 def get_quality_rank(quality):
-    if not quality:
-        return 99
-    return QUALITY_RANK.get(quality.lower(), 99)
+    return QUALITY_RANK.get((quality or 'unknown').lower(), 99)
 
 def sort_sequence(files, mode):
-    """
-    Episode wise : Season → Episode → Quality
-    Quality wise : Season → Quality → Episode
-    Season wise  : Quality → Season → Episode
-    """
     def sort_key(f):
         s = f.get('season') or 999
         e = f.get('episode') or 999
@@ -99,101 +87,122 @@ def sort_sequence(files, mode):
         elif mode == 'season':
             return (q, s, e)
         return (s, e, q)
-
     return sorted(files, key=sort_key)
 
 
-# ── /bot_mode command ─────────────────────────────────────────────────────────
+# ── /bot_mode ─────────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('bot_mode'))
 async def bot_mode(client, message):
     current = await codeflixbots.get_bot_mode(message.from_user.id)
-    text = f"**🤖 Current Mode: `{current.upper()}`**\n\nSelect a mode:"
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔄 Auto Rename Mode", callback_data="mode_autorename"),
-            InlineKeyboardButton("📋 Sequence Mode", callback_data="mode_sequence")
-        ]
-    ])
-    await message.reply_text(text, reply_markup=buttons)
+    await message.reply_text(
+        f"**🤖 Current Mode: `{current.upper()}`**\n\nSelect a mode:",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Auto Rename Mode", callback_data="mode_autorename"),
+                InlineKeyboardButton("📋 Sequence Mode", callback_data="mode_sequence")
+            ]
+        ])
+    )
 
 
 @Client.on_callback_query(filters.regex("^mode_"))
 async def mode_callback(client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    mode = callback_query.data.replace("mode_", "")
-    await codeflixbots.set_bot_mode(user_id, mode)
-    mode_name = "🔄 Auto Rename Mode" if mode == "autorename" else "📋 Sequence Mode"
-    await callback_query.message.edit_text(f"**✅ Switched to {mode_name}**")
+    try:
+        user_id = callback_query.from_user.id
+        mode = callback_query.data.replace("mode_", "")
+        await codeflixbots.set_bot_mode(user_id, mode)
+        mode_name = "🔄 Auto Rename Mode" if mode == "autorename" else "📋 Sequence Mode"
+        await callback_query.message.edit_text(f"**✅ Switched to {mode_name}**")
+    except Exception:
+        pass
 
 
-# ── /sequence_mode command ────────────────────────────────────────────────────
+# ── /sequence_mode ────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('sequence_mode'))
 async def sequence_mode_cmd(client, message):
     current = await codeflixbots.get_sequence_mode(message.from_user.id)
-    text = f"**📋 Current Sequence Mode: `{current.upper()}`**\n\nHow would you like to sequence?"
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 Episode Wise", callback_data="seq_episode"),
-            InlineKeyboardButton("🎞 Quality Wise", callback_data="seq_quality"),
-            InlineKeyboardButton("📺 Season Wise", callback_data="seq_season")
-        ]
-    ])
-    await message.reply_text(text, reply_markup=buttons)
+    await message.reply_text(
+        f"**📋 Current Sequence Mode: `{current.upper()}`**\n\nHow would you like to sequence?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🎬 Episode Wise", callback_data="seq_episode"),
+                InlineKeyboardButton("🎞 Quality Wise", callback_data="seq_quality"),
+                InlineKeyboardButton("📺 Season Wise", callback_data="seq_season")
+            ]
+        ])
+    )
 
 
 @Client.on_callback_query(filters.regex("^seq_"))
 async def seq_mode_callback(client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    mode = callback_query.data.replace("seq_", "")
-    await codeflixbots.set_sequence_mode(user_id, mode)
-    names = {'episode': '🎬 Episode Wise', 'quality': '🎞 Quality Wise', 'season': '📺 Season Wise'}
-    await callback_query.message.edit_text(f"**✅ Sequence mode set to {names[mode]}**")
+    try:
+        user_id = callback_query.from_user.id
+        mode = callback_query.data.replace("seq_", "")
+        await codeflixbots.set_sequence_mode(user_id, mode)
+        names = {
+            'episode': '🎬 Episode Wise',
+            'quality': '🎞 Quality Wise',
+            'season': '📺 Season Wise'
+        }
+        await callback_query.message.edit_text(f"**✅ Sequence mode set to {names[mode]}**")
+    except Exception:
+        pass
 
 
-# ── /start_sequence command ───────────────────────────────────────────────────
+# ── /start_sequence ───────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('start_sequence'))
 async def start_sequence(client, message):
     user_id = message.from_user.id
-    bot_mode = await codeflixbots.get_bot_mode(user_id)
-    if bot_mode != 'sequence':
-        return await message.reply_text("**❌ Please switch to Sequence Mode first using /bot_mode**")
+    bot_mode_val = await codeflixbots.get_bot_mode(user_id)
+    if bot_mode_val != 'sequence':
+        return await message.reply_text(
+            "**❌ Please switch to Sequence Mode first using /bot_mode**"
+        )
     sequence_collections[user_id] = []
-    await message.reply_text("**✅ Sequence started! Send your files now...\n\nSend /end_sequence when done.**")
+    await message.reply_text(
+        "**✅ Sequence started! Send your files now...\n\nSend /end_sequence when done.**"
+    )
 
 
-# ── File collector in sequence mode ──────────────────────────────────────────
+# ── File collector — documents, videos, and audio ────────────────────────────
 
-@Client.on_message(filters.private & (filters.document | filters.video | filters.audio | filters.forwarded))
+@Client.on_message(
+    filters.private &
+    (filters.document | filters.video | filters.audio) &
+    ~filters.sticker,
+    group=1
+)
 async def collect_sequence_file(client, message):
     user_id = message.from_user.id
-    bot_mode = await codeflixbots.get_bot_mode(user_id)
 
-    if bot_mode != 'sequence':
-        return  # Let file_rename.py handle it
+    # Only handle if in sequence mode
+    bot_mode_val = await codeflixbots.get_bot_mode(user_id)
+    if bot_mode_val != 'sequence':
+        return
 
     if user_id not in sequence_collections:
-        return await message.reply_text("**❌ Please send /start_sequence first**")
+        return await message.reply_text(
+            "**❌ Please send /start_sequence first**"
+        )
 
-    # Get filename and caption
+    # Get filename
+    file_name = ""
     if message.document:
         file_name = message.document.file_name or ""
     elif message.video:
         file_name = message.video.file_name or ""
     elif message.audio:
         file_name = message.audio.file_name or ""
-    else:
-        file_name = ""
 
     caption = message.caption or ""
-    combined = f"{file_name} {caption}"
+    combined = f"{file_name} {caption}".strip()
 
-    # Extract info
-    episode = extract_episode(combined)
-    season = extract_season(combined)
-    quality = extract_quality(combined)
+    episode = seq_extract_episode(combined)
+    season = seq_extract_season(combined)
+    quality = seq_extract_quality(combined)
 
     file_entry = {
         'message': message,
@@ -206,49 +215,64 @@ async def collect_sequence_file(client, message):
 
     sequence_collections[user_id].append(file_entry)
 
-    # Notify user what was detected
     detected = []
     if season:
-        detected.append(f"Season: {season}")
+        detected.append(f"S{season:02d}")
     if episode:
-        detected.append(f"Episode: {episode}")
-    if quality and quality != 'Unknown':
-        detected.append(f"Quality: {quality}")
+        detected.append(f"E{episode:02d}")
+    if quality and quality != 'unknown':
+        detected.append(quality)
 
     detected_text = " | ".join(detected) if detected else "Nothing detected — will use send order"
     count = len(sequence_collections[user_id])
-    await message.reply_text(f"**✅ File #{count} collected**\n`{detected_text}`")
+    await message.reply_text(
+        f"**✅ File #{count} collected**\n`{detected_text}`",
+        quote=True
+    )
 
 
-# ── /end_sequence command ─────────────────────────────────────────────────────
+# ── /end_sequence ─────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('end_sequence'))
 async def end_sequence(client, message):
     user_id = message.from_user.id
 
     if user_id not in sequence_collections or not sequence_collections[user_id]:
-        return await message.reply_text("**❌ No files collected. Send /start_sequence first.**")
+        return await message.reply_text(
+            "**❌ No files collected. Send /start_sequence first.**"
+        )
 
     files = sequence_collections[user_id]
     seq_mode = await codeflixbots.get_sequence_mode(user_id)
 
-    # Assign send order for files with no episode detected
+    # Assign fallback order for files with no episode detected
     for i, f in enumerate(files):
         if f['episode'] is None:
-            f['episode'] = 1000 + i  # Push to end
+            f['episode'] = 1000 + i
 
-    # Sort files
     sorted_files = sort_sequence(files, seq_mode)
 
-    msg = await message.reply_text(f"**📋 Sequencing {len(sorted_files)} files in `{seq_mode}` mode...**")
+    msg = await message.reply_text(
+        f"**📋 Sequencing {len(sorted_files)} files in `{seq_mode}` mode...**"
+    )
 
-    # Forward files in sorted order
+    success = 0
+    failed = 0
     for i, f in enumerate(sorted_files, 1):
         try:
             await f['message'].forward(user_id)
+            success += 1
         except Exception as e:
+            failed += 1
             await message.reply_text(f"**❌ Failed to forward file #{i}: {e}**")
 
-    # Clear collection — stay in sequence mode
     sequence_collections.pop(user_id, None)
-    await msg.edit(f"**✅ Done! {len(sorted_files)} files forwarded in sequence.**\n\nStill in Sequence Mode. Use /bot_mode to switch.")
+
+    try:
+        await msg.edit(
+            f"**✅ Done! {success} files forwarded in `{seq_mode}` sequence.**"
+            + (f"\n⚠️ {failed} files failed." if failed else "")
+            + "\n\nStill in Sequence Mode. Use /bot_mode to switch."
+        )
+    except:
+        pass
