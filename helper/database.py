@@ -1,6 +1,8 @@
-import motor.motor_asyncio, datetime, pytz
+import motor.motor_asyncio
+import datetime
+import pytz
 from config import Config
-import logging  # Added for logging errors and important information
+import logging
 from .utils import send_log
 
 
@@ -8,13 +10,14 @@ class Database:
     def __init__(self, uri, database_name):
         try:
             self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
-            self._client.server_info()  # This will raise an exception if the connection fails
+            self._client.server_info()
             logging.info("Successfully connected to MongoDB")
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {e}")
-            raise e  # Re-raise the exception after logging it
-        self.codeflixbots = self._client[database_name]
-        self.col = self.codeflixbots.user
+            raise e
+        self.db = self._client[database_name]
+        self.col = self.db.user
+        self.processing_col = self.db.processing
 
     def new_user(self, id):
         return dict(
@@ -22,8 +25,7 @@ class Database:
             join_date=datetime.date.today().isoformat(),
             file_id=None,
             caption=None,
-            metadata=True,
-            metadata_code="Telegram : @Codeflix_Bots",
+            metadata="Off",
             format_template=None,
             ban_status=dict(
                 is_banned=False,
@@ -53,16 +55,14 @@ class Database:
 
     async def total_users_count(self):
         try:
-            count = await self.col.count_documents({})
-            return count
+            return await self.col.count_documents({})
         except Exception as e:
             logging.error(f"Error counting users: {e}")
             return 0
 
     async def get_all_users(self):
         try:
-            all_users = self.col.find({})
-            return all_users
+            return self.col.find({})
         except Exception as e:
             logging.error(f"Error getting all users: {e}")
             return None
@@ -134,53 +134,109 @@ class Database:
             return None
 
     async def get_metadata(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('metadata', "Off")
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('metadata', "Off") if user else "Off"
+        except Exception as e:
+            logging.error(f"Error getting metadata for user {user_id}: {e}")
+            return "Off"
 
     async def set_metadata(self, user_id, metadata):
-        await self.col.update_one({'_id': int(user_id)}, {'$set': {'metadata': metadata}})
+        try:
+            await self.col.update_one({'_id': int(user_id)}, {'$set': {'metadata': metadata}})
+        except Exception as e:
+            logging.error(f"Error setting metadata for user {user_id}: {e}")
 
     async def get_title(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('title', 'Encoded by @Animes_Cruise')
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('title', 'Encoded by @Animes_Cruise') if user else 'Encoded by @Animes_Cruise'
+        except:
+            return 'Encoded by @Animes_Cruise'
 
     async def set_title(self, user_id, title):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'title': title}})
 
     async def get_author(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('author', '@Animes_Cruise')
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('author', '@Animes_Cruise') if user else '@Animes_Cruise'
+        except:
+            return '@Animes_Cruise'
 
     async def set_author(self, user_id, author):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'author': author}})
 
     async def get_artist(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('artist', '@Animes_Cruise')
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('artist', '@Animes_Cruise') if user else '@Animes_Cruise'
+        except:
+            return '@Animes_Cruise'
 
     async def set_artist(self, user_id, artist):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'artist': artist}})
 
     async def get_audio(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('audio', 'By @Animes_Cruise')
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('audio', 'By @Animes_Cruise') if user else 'By @Animes_Cruise'
+        except:
+            return 'By @Animes_Cruise'
 
     async def set_audio(self, user_id, audio):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'audio': audio}})
 
     async def get_subtitle(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('subtitle', "By @Animes_Cruise")
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('subtitle', 'By @Animes_Cruise') if user else 'By @Animes_Cruise'
+        except:
+            return 'By @Animes_Cruise'
 
     async def set_subtitle(self, user_id, subtitle):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'subtitle': subtitle}})
 
     async def get_video(self, user_id):
-        user = await self.col.find_one({'_id': int(user_id)})
-        return user.get('video', 'Encoded By @Animes_Cruise')
+        try:
+            user = await self.col.find_one({'_id': int(user_id)})
+            return user.get('video', 'Encoded By @Animes_Cruise') if user else 'Encoded By @Animes_Cruise'
+        except:
+            return 'Encoded By @Animes_Cruise'
 
     async def set_video(self, user_id, video):
         await self.col.update_one({'_id': int(user_id)}, {'$set': {'video': video}})
+
+    # ── Processing lock (prevents duplicate processing across restarts) ────────
+
+    async def is_processing(self, file_id):
+        try:
+            doc = await self.processing_col.find_one({"_id": file_id})
+            if not doc:
+                return False
+            age = (datetime.datetime.utcnow() - doc["time"]).total_seconds()
+            if age > 600:
+                await self.clear_processing(file_id)
+                return False
+            return True
+        except:
+            return False
+
+    async def set_processing(self, file_id):
+        try:
+            await self.processing_col.update_one(
+                {"_id": file_id},
+                {"$set": {"time": datetime.datetime.utcnow()}},
+                upsert=True
+            )
+        except:
+            pass
+
+    async def clear_processing(self, file_id):
+        try:
+            await self.processing_col.delete_one({"_id": file_id})
+        except:
+            pass
 
 
 codeflixbots = Database(Config.DB_URL, Config.DB_NAME)
