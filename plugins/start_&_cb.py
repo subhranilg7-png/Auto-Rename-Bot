@@ -234,9 +234,14 @@ async def cb_handler(client, query: CallbackQuery):
 @Client.on_message(filters.command("donate"))
 async def donation(client, message):
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="ʙᴀᴄᴋ", callback_data="help"), InlineKeyboardButton(text="ᴏᴡɴᴇʀ", url='https://t.me/sewxiy')]
+        [InlineKeyboardButton(text="ʙᴀᴄᴋ", callback_data="help"),
+         InlineKeyboardButton(text="ᴏᴡɴᴇʀ", url='https://t.me/sewxiy')]
     ])
-    yt = await message.reply_photo(photo='https://graph.org/file/1919fe077848bd0783d4c.jpg', caption=Txt.DONATE_TXT, reply_markup=buttons)
+    yt = await message.reply_photo(
+        photo='https://graph.org/file/1919fe077848bd0783d4c.jpg',
+        caption=Txt.DONATE_TXT,
+        reply_markup=buttons
+    )
     await asyncio.sleep(300)
     await yt.delete()
     await message.delete()
@@ -246,9 +251,14 @@ async def donation(client, message):
 @Client.on_message(filters.command("premium"))
 async def getpremium(bot, message):
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("ᴏᴡɴᴇʀ", url="https://t.me/sewxiy"), InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close")]
+        [InlineKeyboardButton("ᴏᴡɴᴇʀ", url="https://t.me/sewxiy"),
+         InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close")]
     ])
-    yt = await message.reply_photo(photo='https://graph.org/file/feebef43bbdf76e796b1b.jpg', caption=Txt.PREMIUM_TXT, reply_markup=buttons)
+    yt = await message.reply_photo(
+        photo='https://graph.org/file/feebef43bbdf76e796b1b.jpg',
+        caption=Txt.PREMIUM_TXT,
+        reply_markup=buttons
+    )
     await asyncio.sleep(300)
     await yt.delete()
     await message.delete()
@@ -258,9 +268,14 @@ async def getpremium(bot, message):
 @Client.on_message(filters.command("plan"))
 async def premium(bot, message):
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("sᴇɴᴅ ss", url="https://t.me/sewxiy"), InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close")]
+        [InlineKeyboardButton("sᴇɴᴅ ss", url="https://t.me/sewxiy"),
+         InlineKeyboardButton("ᴄʟᴏsᴇ", callback_data="close")]
     ])
-    yt = await message.reply_photo(photo='https://graph.org/file/8b50e21db819f296661b7.jpg', caption=Txt.PREPLANS_TXT, reply_markup=buttons)
+    yt = await message.reply_photo(
+        photo='https://graph.org/file/8b50e21db819f296661b7.jpg',
+        caption=Txt.PREPLANS_TXT,
+        reply_markup=buttons
+    )
     await asyncio.sleep(300)
     await yt.delete()
     await message.delete()
@@ -271,19 +286,26 @@ async def premium(bot, message):
 async def bought(client, message):
     msg = await message.reply('Wait im checking...')
     replied = message.reply_to_message
-
     if not replied:
-        await msg.edit("<b>Please reply with the screenshot of your payment for the premium purchase to proceed.\n\nFor example, first upload your screenshot, then reply to it using the '/bought' command</b>")
+        await msg.edit(
+            "<b>Please reply with the screenshot of your payment.\n\n"
+            "Upload your screenshot first, then reply to it using /bought</b>"
+        )
     elif replied.photo:
         await client.send_photo(
-            chat_id=LOG_CHANNEL,
+            chat_id=Config.LOG_CHANNEL,
             photo=replied.photo.file_id,
-            caption=f'<b>User - {message.from_user.mention}\nUser id - <code>{message.from_user.id}</code>\nUsername - <code>{message.from_user.username}</code>\nName - <code>{message.from_user.first_name}</code></b>',
+            caption=(
+                f'<b>User - {message.from_user.mention}\n'
+                f'User id - <code>{message.from_user.id}</code>\n'
+                f'Username - <code>{message.from_user.username}</code>\n'
+                f'Name - <code>{message.from_user.first_name}</code></b>'
+            ),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Close", callback_data="close_data")]
             ])
         )
-        await msg.edit_text('<b>Your screenshot has been sent to Admins</b>')
+        await msg.edit_text('<b>Your screenshot has been sent to Admins ✅</b>')
 
 
 # Help Command Handler
@@ -296,8 +318,10 @@ async def help_command(client, message):
         disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("• ᴀᴜᴛᴏ ʀᴇɴᴀᴍᴇ ғᴏʀᴍᴀᴛ •", callback_data='file_names')],
-            [InlineKeyboardButton('• ᴛʜᴜᴍʙɴᴀɪʟ', callback_data='thumbnail'), InlineKeyboardButton('ᴄᴀᴘᴛɪᴏɴ •', callback_data='caption')],
-            [InlineKeyboardButton('• ᴍᴇᴛᴀᴅᴀᴛᴀ', callback_data='meta'), InlineKeyboardButton('ᴅᴏɴᴀᴛᴇ •', callback_data='donate')],
+            [InlineKeyboardButton('• ᴛʜᴜᴍʙɴᴀɪʟ', callback_data='thumbnail'),
+             InlineKeyboardButton('ᴄᴀᴘᴛɪᴏɴ •', callback_data='caption')],
+            [InlineKeyboardButton('• ᴍᴇᴛᴀᴅᴀᴛᴀ', callback_data='meta'),
+             InlineKeyboardButton('ᴅᴏɴᴀᴛᴇ •', callback_data='donate')],
             [InlineKeyboardButton('• ʜᴏᴍᴇ', callback_data='home')]
         ])
     )
@@ -308,6 +332,10 @@ COMMANDS_TXT = """<b>📋 ᴀʟʟ ᴀᴠᴀɪʟᴀʙʟᴇ ᴄᴏᴍᴍᴀɴᴅs 
 
 <b>🔄 ʀᴇɴᴀᴍᴇ :</b>
 ➲ /autorename — sᴇᴛ ᴀᴜᴛᴏ ʀᴇɴᴀᴍᴇ ғᴏʀᴍᴀᴛ
+
+<b>📋 ǫᴜᴇᴜᴇ :</b>
+➲ /queue — ᴠɪᴇᴡ ʏᴏᴜʀ ǫᴜᴇᴜᴇ sᴛᴀᴛᴜs
+➲ /cancel_queue — ᴄᴀɴᴄᴇʟ ᴀʟʟ ᴘᴇɴᴅɪɴɢ ғɪʟᴇs
 
 <b>🖼 ᴛʜᴜᴍʙɴᴀɪʟ :</b>
 ➲ /viewthumb — ᴠɪᴇᴡ ʏᴏᴜʀ ᴛʜᴜᴍʙɴᴀɪʟ
@@ -326,14 +354,6 @@ COMMANDS_TXT = """<b>📋 ᴀʟʟ ᴀᴠᴀɪʟᴀʙʟᴇ ᴄᴏᴍᴍᴀɴᴅs 
 ➲ /setaudio — sᴇᴛ ᴀᴜᴅɪᴏ ᴛɪᴛʟᴇ
 ➲ /setsubtitle — sᴇᴛ sᴜʙᴛɪᴛʟᴇ ᴛɪᴛʟᴇ
 ➲ /setvideo — sᴇᴛ ᴠɪᴅᴇᴏ ᴛɪᴛʟᴇ
-
-<b>🤖 ʙᴏᴛ ᴍᴏᴅᴇ :</b>
-➲ /bot_mode — sᴡɪᴛᴄʜ ʙᴇᴛᴡᴇᴇɴ ᴀᴜᴛᴏ ʀᴇɴᴀᴍᴇ & sᴇǫᴜᴇɴᴄᴇ ᴍᴏᴅᴇ
-
-<b>📋 sᴇǫᴜᴇɴᴄᴇ :</b>
-➲ /sequence_mode — sᴇᴛ sᴏʀᴛɪɴɢ (ᴇᴘɪsᴏᴅᴇ/ǫᴜᴀʟɪᴛʏ/sᴇᴀsᴏɴ)
-➲ /start_sequence — sᴛᴀʀᴛ ᴄᴏʟʟᴇᴄᴛɪɴɢ ғɪʟᴇs
-➲ /end_sequence — sᴏʀᴛ & ғᴏʀᴡᴀʀᴅ ғɪʟᴇs
 
 <b>ℹ️ ɢᴇɴᴇʀᴀʟ :</b>
 ➲ /start — sᴛᴀʀᴛ ᴛʜᴇ ʙᴏᴛ
