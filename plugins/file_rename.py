@@ -22,7 +22,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Pending manual input
+# ── Queue system ───────────────────────────────────────────────────────────────
+# { user_id: [ {task}, ... ] }
+user_queues = {}
+# { user_id: True } — is a task currently being processed
+user_processing = {}
+# { user_id: True } — user requested cancel
+user_cancel = {}
+
+# Pending manual input store
 pending_manual_input = {}
 
 # Create required directories on startup
@@ -94,13 +102,7 @@ def extract_quality(text):
             return extractor(match)
     return None
 
-def sanitize_filename(filename):
-    sanitized = re.sub(r'[<>:"/\\|?*@#$%^&]', '_', filename)
-    sanitized = re.sub(r'\s+', ' ', sanitized)
-    return sanitized.strip()
-
 async def safe_edit(msg, text):
-    """Edit message ignoring MESSAGE_NOT_MODIFIED errors"""
     try:
         await msg.edit(text)
     except Exception:
@@ -115,7 +117,7 @@ async def cleanup_files(*paths):
             logger.error(f"Error removing {path}: {e}")
 
 async def wait_for_download(file_path, download_path, timeout=120):
-    """Wait for Pyrogram .temp file to finish downloading"""
+    """Wait for Pyrogram .temp file to finish"""
     temp_path = f"{file_path}.temp" if file_path else f"{download_path}.temp"
     waited = 0
     while waited < timeout:
@@ -123,19 +125,14 @@ async def wait_for_download(file_path, download_path, timeout=120):
             break
         await asyncio.sleep(2)
         waited += 2
-
     if os.path.exists(temp_path):
         raise Exception(f"Download timed out after {timeout}s — file still incomplete")
-
     await asyncio.sleep(1)
-
     if not file_path or not os.path.exists(file_path):
         raise Exception("Download failed — file not found after completion")
-
     size = os.path.getsize(file_path)
     if size == 0:
         raise Exception("Download failed — file is empty")
-
     logger.info(f"Download complete: {file_path} ({size} bytes)")
     return file_path
 
@@ -152,52 +149,106 @@ async def process_thumbnail(thumb_path):
         await cleanup_files(thumb_path)
         return None
 
-async def add_metadata(input_path, output_path, user_id):
+def escape_metadata(text):
+    return text.replace('"', '\\"').replace("'", "\\'")
+
+async def add_metadata_with_fallback(input_path, output_path, user_id):
+    """
+    3-level metadata fallback (same approach as friend's bot):
+    Level 1: Full metadata with separate stream codecs
+    Level 2: Simplified metadata with -c copy
+    Level 3: shutil.copy2 (file copied unchanged, no metadata)
+    Returns: (output_path, metadata_added: bool)
+    """
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
-        raise RuntimeError("FFmpeg not found in PATH")
+        # No FFmpeg — just copy
+        shutil.copy2(input_path, output_path)
+        return output_path, False
 
-    if not os.path.exists(input_path):
-        raise RuntimeError(f"Input file not found: {input_path}")
-    if os.path.getsize(input_path) == 0:
-        raise RuntimeError("Input file is empty")
+    if not os.path.exists(input_path) or os.path.getsize(input_path) == 0:
+        raise RuntimeError("Input file missing or empty")
 
-    metadata = {
-        'title': await codeflixbots.get_title(user_id),
-        'artist': await codeflixbots.get_artist(user_id),
-        'author': await codeflixbots.get_author(user_id),
-        'video_title': await codeflixbots.get_video(user_id),
-        'audio_title': await codeflixbots.get_audio(user_id),
-        'subtitle': await codeflixbots.get_subtitle(user_id)
-    }
+    title = await codeflixbots.get_title(user_id)
+    artist = await codeflixbots.get_artist(user_id)
+    author = await codeflixbots.get_author(user_id)
+    video_title = await codeflixbots.get_video(user_id)
+    audio_title = await codeflixbots.get_audio(user_id)
+    subtitle_title = await codeflixbots.get_subtitle(user_id)
 
-    cmd = [
+    # ── Level 1: Full metadata with separate stream copy ──────────────────────
+    cmd1 = [
         ffmpeg, '-y',
         '-i', input_path,
-        '-metadata', f'title={metadata["title"]}',
-        '-metadata', f'artist={metadata["artist"]}',
-        '-metadata', f'author={metadata["author"]}',
-        '-metadata:s:v', f'title={metadata["video_title"]}',
-        '-metadata:s:a', f'title={metadata["audio_title"]}',
-        '-metadata:s:s', f'title={metadata["subtitle"]}',
         '-map', '0',
-        '-c', 'copy',
-        '-loglevel', 'error',
+        '-c:v', 'copy',
+        '-c:a', 'copy',
+        '-c:s', 'copy',
+        '-metadata', f'title={escape_metadata(title)}',
+        '-metadata', f'artist={escape_metadata(artist)}',
+        '-metadata', f'author={escape_metadata(author)}',
+        '-metadata:s:v', f'title={escape_metadata(video_title)}',
+        '-metadata:s:a', f'title={escape_metadata(audio_title)}',
+        '-metadata:s:s', f'title={escape_metadata(subtitle_title)}',
         output_path
     ]
+    try:
+        process = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd1,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            ),
+            timeout=180
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info("Metadata added successfully (Level 1)")
+            return output_path, True
+    except asyncio.TimeoutError:
+        logger.warning("Level 1 metadata timed out")
+    except Exception as e:
+        logger.warning(f"Level 1 metadata failed: {e}")
 
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
-    )
-    _, stderr = await process.communicate()
+    # ── Level 2: Simplified metadata with -c copy ─────────────────────────────
+    if os.path.exists(output_path):
+        await cleanup_files(output_path)
+    cmd2 = [
+        ffmpeg, '-y',
+        '-i', input_path,
+        '-map', '0',
+        '-c', 'copy',
+        '-metadata', f'title={escape_metadata(title)}',
+        '-metadata', f'artist={escape_metadata(artist)}',
+        '-metadata', f'author={escape_metadata(author)}',
+        output_path
+    ]
+    try:
+        process2 = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd2,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            ),
+            timeout=180
+        )
+        _, stderr2 = await process2.communicate()
+        if process2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            logger.info("Metadata added successfully (Level 2)")
+            return output_path, True
+    except asyncio.TimeoutError:
+        logger.warning("Level 2 metadata timed out")
+    except Exception as e:
+        logger.warning(f"Level 2 metadata failed: {e}")
 
-    if process.returncode != 0:
-        raise RuntimeError(f"FFmpeg error: {stderr.decode()}")
+    # ── Level 3: Just copy the file — no metadata ─────────────────────────────
+    logger.warning("Both metadata levels failed — copying file without metadata")
+    if os.path.exists(output_path):
+        await cleanup_files(output_path)
+    shutil.copy2(input_path, output_path)
+    return output_path, False
 
-    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-        raise RuntimeError("FFmpeg output file is missing or empty")
+# ── Core rename + upload logic ─────────────────────────────────────────────────
 
 async def do_rename(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     download_path = None
@@ -221,7 +272,7 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
         new_filename = f"{format_template}{ext}"
 
-        # Use unique ID path — avoids all special char issues
+        # Use unique ID — avoids all special char issues
         unique_id = f"{user_id}_{int(time.time())}"
         download_path = f"downloads/{unique_id}{ext}"
         metadata_path = f"metadata/{unique_id}{ext}"
@@ -238,22 +289,34 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             progress_args=("Downloading...", msg, time.time())
         )
 
-        # Wait for download to fully complete
         await safe_edit(msg, "**Waiting for download to complete... ⏳**")
         file_path = await wait_for_download(file_path, download_path)
 
-        # Process metadata — stops and tells user if it fails
-        await safe_edit(msg, "**Processing metadata... 🔧**")
-        try:
-            await add_metadata(file_path, metadata_path, user_id)
-            file_path = metadata_path
-        except Exception as e:
-            logger.error(f"Metadata failed: {e}")
-            await safe_edit(
-                msg,
-                f"**❌ Metadata processing failed:**\n`{str(e)}`\n\nPlease try again."
-            )
-            return
+        # Check metadata setting
+        metadata_enabled = await codeflixbots.get_metadata(user_id)
+
+        if metadata_enabled == "On":
+            await safe_edit(msg, "**Processing metadata... 🔧**")
+            try:
+                output_path, metadata_added = await add_metadata_with_fallback(
+                    file_path, metadata_path, user_id
+                )
+                file_path = output_path
+                if not metadata_added:
+                    # Notify user that metadata fallback was used
+                    await message.reply_text(
+                        "⚠️ **Metadata Notice:**\nCould not embed metadata into this file "
+                        "(FFmpeg failed on both attempts).\n"
+                        "File will be uploaded **without metadata** but fully intact."
+                    )
+            except Exception as e:
+                logger.error(f"Metadata failed entirely: {e}")
+                await message.reply_text(
+                    f"⚠️ **Metadata failed:** `{str(e)}`\nUploading original file without metadata."
+                )
+                file_path = download_path
+        else:
+            logger.info("Metadata is Off — skipping")
 
         await safe_edit(msg, "**Preparing upload... 📤**")
         caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
@@ -303,21 +366,152 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         await cleanup_files(download_path, metadata_path)
         if thumb_path and thumb_path != thumb:
             await cleanup_files(thumb_path)
-        try:
-            await codeflixbots.clear_processing(file_id)
-        except:
-            pass
 
+# ── Queue processor ────────────────────────────────────────────────────────────
+
+async def process_queue(client, user_id):
+    """Process files one by one from user's queue"""
+    if user_processing.get(user_id, False):
+        return
+
+    user_processing[user_id] = True
+
+    try:
+        while user_queues.get(user_id) and not user_cancel.get(user_id, False):
+            task = user_queues[user_id].pop(0)
+
+            remaining = len(user_queues.get(user_id, []))
+            total_done = task['total'] - remaining
+
+            try:
+                await task['queue_msg'].edit(
+                    f"**⚙️ Processing file {total_done}/{task['total']}**\n"
+                    f"`{task['file_name'][:50]}`"
+                )
+            except:
+                pass
+
+            await do_rename(
+                client,
+                task['message'],
+                user_id,
+                task['format_template'],
+                task['file_id'],
+                task['file_name'],
+                task['media_type'],
+                task['season'],
+                task['episode'],
+                task['quality']
+            )
+
+        if user_cancel.get(user_id, False):
+            remaining = len(user_queues.get(user_id, []))
+            user_queues[user_id] = []
+            user_cancel[user_id] = False
+            try:
+                await client.send_message(
+                    user_id,
+                    f"**✅ Queue cancelled. {remaining} file(s) removed.**"
+                )
+            except:
+                pass
+        else:
+            if not user_queues.get(user_id):
+                try:
+                    await client.send_message(
+                        user_id,
+                        "**✅ All files in queue processed!**"
+                    )
+                except:
+                    pass
+    finally:
+        user_processing[user_id] = False
+
+# ── Queue commands ─────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.private & filters.command('queue'))
+async def queue_status(client, message):
+    user_id = message.from_user.id
+    queue = user_queues.get(user_id, [])
+    is_proc = user_processing.get(user_id, False)
+
+    if not queue and not is_proc:
+        return await message.reply_text("**📋 Your queue is empty.**")
+
+    text = "**📋 Queue Status**\n\n"
+    text += f"**Processing:** {'Yes ⚙️' if is_proc else 'No'}\n"
+    text += f"**Pending:** {len(queue)} file(s)\n\n"
+
+    if queue:
+        text += "**Pending files:**\n"
+        for i, task in enumerate(queue[:10], 1):
+            text += f"`{i}.` {task['file_name'][:45]}\n"
+        if len(queue) > 10:
+            text += f"_...and {len(queue) - 10} more_"
+
+    await message.reply_text(text)
+
+
+@Client.on_message(filters.private & filters.command('cancel_queue'))
+async def cancel_queue(client, message):
+    user_id = message.from_user.id
+    queue = user_queues.get(user_id, [])
+    count = len(queue)
+
+    if not queue and not user_processing.get(user_id, False):
+        return await message.reply_text("**📋 Your queue is already empty.**")
+
+    user_cancel[user_id] = True
+    user_queues[user_id] = []
+    await message.reply_text(
+        f"**✅ Queue cancelled!**\n{count} pending file(s) removed."
+    )
+
+# ── Add to queue helper ────────────────────────────────────────────────────────
+
+async def add_to_queue(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
+    if user_id not in user_queues:
+        user_queues[user_id] = []
+
+    total = len(user_queues[user_id]) + 1
+    for task in user_queues[user_id]:
+        task['total'] = total
+
+    queue_msg = await message.reply_text(
+        f"**📋 Added to queue!**\n"
+        f"Position: `{total}`\n"
+        f"File: `{file_name[:50]}`"
+    )
+
+    task = {
+        'message': message,
+        'user_id': user_id,
+        'format_template': format_template,
+        'file_id': file_id,
+        'file_name': file_name,
+        'media_type': media_type,
+        'season': season,
+        'episode': episode,
+        'quality': quality,
+        'total': total,
+        'queue_msg': queue_msg
+    }
+
+    user_queues[user_id].append(task)
+
+    if not user_processing.get(user_id, False):
+        asyncio.create_task(process_queue(client, user_id))
 
 # ── Manual input handler ───────────────────────────────────────────────────────
 
 @Client.on_message(
     filters.private & filters.text & ~filters.command(
         ['start', 'autorename', 'set_caption', 'del_caption', 'see_caption',
-         'view_thumb', 'viewthumb', 'del_thumb', 'delthumb', 'bot_mode',
-         'sequence_mode', 'start_sequence', 'end_sequence', 'metadata',
+         'view_thumb', 'viewthumb', 'del_thumb', 'delthumb', 'metadata',
          'settitle', 'setauthor', 'setartist', 'setaudio', 'setsubtitle',
-         'setvideo', 'help', 'commands', 'donate', 'premium', 'plan']
+         'setvideo', 'help', 'commands', 'donate', 'premium', 'plan',
+         'queue', 'cancel_queue', 'setmedia', 'restart', 'stats', 'broadcast',
+         'tutorial']
     )
 )
 async def handle_manual_input(client, message):
@@ -359,27 +553,18 @@ async def handle_manual_input(client, message):
 
     del pending_manual_input[user_id]
 
-    await do_rename(
-        client, data['message'], user_id,
+    await add_to_queue(
+        client, data['message'], data['user_id'],
         data['format_template'], data['file_id'],
         data['file_name'], data['media_type'],
         data.get('season'), data.get('episode'), data.get('quality')
     )
 
+# ── Main file handler ──────────────────────────────────────────────────────────
 
-# ── Main file handler (group=0, higher priority than sequence.py group=1) ──────
-
-@Client.on_message(
-    filters.private & (filters.document | filters.video | filters.audio),
-    group=0
-)
+@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def auto_rename_files(client, message):
     user_id = message.from_user.id
-
-    # If sequence mode — let sequence.py handle it
-    bot_mode_val = await codeflixbots.get_bot_mode(user_id)
-    if bot_mode_val == 'sequence':
-        return
 
     format_template = await codeflixbots.get_format_template(user_id)
     if not format_template:
@@ -403,13 +588,7 @@ async def auto_rename_files(client, message):
         return
 
     if await check_anti_nsfw(file_name, message):
-        return await message.reply_text("NSFW content detected")
-
-    # DB-backed dedup to survive restarts
-    if await codeflixbots.is_processing(file_id):
-        logger.info(f"Skipping duplicate: {file_id}")
         return
-    await codeflixbots.set_processing(file_id)
 
     caption_text = message.caption or ""
     combined = f"{file_name} {caption_text}"
@@ -430,6 +609,7 @@ async def auto_rename_files(client, message):
             'field': missing[0],
             'data': {
                 'message': message,
+                'user_id': user_id,
                 'format_template': format_template,
                 'file_id': file_id,
                 'file_name': file_name,
@@ -450,8 +630,8 @@ async def auto_rename_files(client, message):
         )
         return
 
-    await do_rename(
+    await add_to_queue(
         client, message, user_id, format_template,
         file_id, file_name, media_type,
         season, episode, quality
-)
+    )
