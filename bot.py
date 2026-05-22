@@ -21,6 +21,7 @@ pyrogram.utils.MIN_CHANNEL_ID = -1009147483647
 
 PORT = Config.PORT
 
+
 class Bot(Client):
 
     def __init__(self):
@@ -50,9 +51,7 @@ class Bot(Client):
         uptime_seconds = int(time.time() - self.start_time)
         uptime_string = str(timedelta(seconds=uptime_seconds))
 
-        # Only send to LOG_CHANNEL — removed SUPPORT_CHAT which was causing crashes
         try:
-            curr = datetime.now(timezone("Asia/Kolkata"))
             await self.send_photo(
                 chat_id=Config.LOG_CHANNEL,
                 photo=Config.START_PIC,
@@ -66,5 +65,6 @@ class Bot(Client):
             )
         except Exception as e:
             print(f"Failed to send startup message: {e}")
+
 
 Bot().run()
