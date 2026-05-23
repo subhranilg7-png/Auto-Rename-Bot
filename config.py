@@ -23,6 +23,9 @@ class Config(object):
 
     # webhook configuration
     WEBHOOK = bool(os.environ.get("WEBHOOK", "True"))
+    
+    # Force subscription - DISABLED
+    FORCE_SUB_CHANNELS = []  # Empty list means no force subscription
 
 
 class Txt(object):
