@@ -23,11 +23,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Queue system ───────────────────────────────────────────────────────────────
-# { user_id: [ {task}, ... ] }
 user_queues = {}
-# { user_id: True } — is a task currently being processed
 user_processing = {}
-# { user_id: True } — user requested cancel
 user_cancel = {}
 
 # Pending manual input store
@@ -117,7 +114,6 @@ async def cleanup_files(*paths):
             logger.error(f"Error removing {path}: {e}")
 
 async def wait_for_download(file_path, download_path, timeout=120):
-    """Wait for Pyrogram .temp file to finish"""
     temp_path = f"{file_path}.temp" if file_path else f"{download_path}.temp"
     waited = 0
     while waited < timeout:
@@ -126,7 +122,7 @@ async def wait_for_download(file_path, download_path, timeout=120):
         await asyncio.sleep(2)
         waited += 2
     if os.path.exists(temp_path):
-        raise Exception(f"Download timed out after {timeout}s — file still incomplete")
+        raise Exception(f"Download timed out after {timeout}s")
     await asyncio.sleep(1)
     if not file_path or not os.path.exists(file_path):
         raise Exception("Download failed — file not found after completion")
@@ -150,24 +146,93 @@ async def process_thumbnail(thumb_path):
         return None
 
 def escape_metadata(text):
-    return text.replace('"', '\\"').replace("'", "\\'")
+    return str(text).replace('"', '\\"').replace("'", "\\'")
 
-async def add_metadata_with_fallback(input_path, output_path, user_id):
-    """
-    3-level metadata fallback (same approach as friend's bot):
-    Level 1: Full metadata with separate stream codecs
-    Level 2: Simplified metadata with -c copy
-    Level 3: shutil.copy2 (file copied unchanged, no metadata)
-    Returns: (output_path, metadata_added: bool)
-    """
+# ── MKV metadata using mkvpropedit ────────────────────────────────────────────
+
+async def add_metadata_mkv(file_path, user_id):
+    """Uses mkvpropedit for MKV — edits in-place, zero corruption risk"""
+    mkvpropedit = shutil.which('mkvpropedit')
+    if not mkvpropedit:
+        logger.warning("mkvpropedit not found — falling back to FFmpeg")
+        return await add_metadata_ffmpeg(file_path, user_id)
+
+    title = await codeflixbots.get_title(user_id)
+    video_title = await codeflixbots.get_video(user_id)
+    audio_title = await codeflixbots.get_audio(user_id)
+    subtitle_title = await codeflixbots.get_subtitle(user_id)
+
+    # Try with subtitle track first
+    cmd = [
+        mkvpropedit, file_path,
+        '--edit', 'info',
+        '--set', f'title={title}',
+        '--edit', 'track:v1',
+        '--set', f'name={video_title}',
+        '--edit', 'track:a1',
+        '--set', f'name={audio_title}',
+        '--edit', 'track:s1',
+        '--set', f'name={subtitle_title}',
+    ]
+    try:
+        process = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            ),
+            timeout=60
+        )
+        _, stderr = await process.communicate()
+        if process.returncode == 0:
+            logger.info("MKV metadata added via mkvpropedit")
+            return file_path, True
+    except asyncio.TimeoutError:
+        logger.warning("mkvpropedit timed out")
+    except Exception as e:
+        logger.warning(f"mkvpropedit error: {e}")
+
+    # Retry without subtitle track
+    cmd_no_sub = [
+        mkvpropedit, file_path,
+        '--edit', 'info',
+        '--set', f'title={title}',
+        '--edit', 'track:v1',
+        '--set', f'name={video_title}',
+        '--edit', 'track:a1',
+        '--set', f'name={audio_title}',
+    ]
+    try:
+        process2 = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd_no_sub,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            ),
+            timeout=60
+        )
+        _, stderr2 = await process2.communicate()
+        if process2.returncode == 0:
+            logger.info("MKV metadata added (no subtitle track)")
+            return file_path, True
+    except Exception as e:
+        logger.warning(f"mkvpropedit retry failed: {e}")
+
+    return file_path, False
+
+# ── FFmpeg fallback for non-MKV ───────────────────────────────────────────────
+
+async def add_metadata_ffmpeg(input_path, user_id):
+    """3-level FFmpeg fallback"""
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
-        # No FFmpeg — just copy
-        shutil.copy2(input_path, output_path)
-        return output_path, False
+        return input_path, False
 
     if not os.path.exists(input_path) or os.path.getsize(input_path) == 0:
         raise RuntimeError("Input file missing or empty")
+
+    ext = os.path.splitext(input_path)[1]
+    output_path = input_path.replace(ext, f"_meta{ext}")
 
     title = await codeflixbots.get_title(user_id)
     artist = await codeflixbots.get_artist(user_id)
@@ -176,14 +241,10 @@ async def add_metadata_with_fallback(input_path, output_path, user_id):
     audio_title = await codeflixbots.get_audio(user_id)
     subtitle_title = await codeflixbots.get_subtitle(user_id)
 
-    # ── Level 1: Full metadata with separate stream copy ──────────────────────
+    # Level 1
     cmd1 = [
-        ffmpeg, '-y',
-        '-i', input_path,
-        '-map', '0',
-        '-c:v', 'copy',
-        '-c:a', 'copy',
-        '-c:s', 'copy',
+        ffmpeg, '-y', '-i', input_path,
+        '-map', '0', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy',
         '-metadata', f'title={escape_metadata(title)}',
         '-metadata', f'artist={escape_metadata(artist)}',
         '-metadata', f'author={escape_metadata(author)}',
@@ -193,66 +254,56 @@ async def add_metadata_with_fallback(input_path, output_path, user_id):
         output_path
     ]
     try:
-        process = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                *cmd1,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            ),
+        p = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(*cmd1, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE),
             timeout=180
         )
-        _, stderr = await process.communicate()
-        if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info("Metadata added successfully (Level 1)")
+        await p.communicate()
+        if p.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            await cleanup_files(input_path)
             return output_path, True
-    except asyncio.TimeoutError:
-        logger.warning("Level 1 metadata timed out")
-    except Exception as e:
-        logger.warning(f"Level 1 metadata failed: {e}")
+    except:
+        pass
 
-    # ── Level 2: Simplified metadata with -c copy ─────────────────────────────
+    # Level 2
     if os.path.exists(output_path):
         await cleanup_files(output_path)
     cmd2 = [
-        ffmpeg, '-y',
-        '-i', input_path,
-        '-map', '0',
-        '-c', 'copy',
+        ffmpeg, '-y', '-i', input_path,
+        '-map', '0', '-c', 'copy',
         '-metadata', f'title={escape_metadata(title)}',
-        '-metadata', f'artist={escape_metadata(artist)}',
-        '-metadata', f'author={escape_metadata(author)}',
         output_path
     ]
     try:
-        process2 = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                *cmd2,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            ),
+        p2 = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(*cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE),
             timeout=180
         )
-        _, stderr2 = await process2.communicate()
-        if process2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            logger.info("Metadata added successfully (Level 2)")
+        await p2.communicate()
+        if p2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            await cleanup_files(input_path)
             return output_path, True
-    except asyncio.TimeoutError:
-        logger.warning("Level 2 metadata timed out")
-    except Exception as e:
-        logger.warning(f"Level 2 metadata failed: {e}")
+    except:
+        pass
 
-    # ── Level 3: Just copy the file — no metadata ─────────────────────────────
-    logger.warning("Both metadata levels failed — copying file without metadata")
+    # Level 3 — no metadata
     if os.path.exists(output_path):
         await cleanup_files(output_path)
-    shutil.copy2(input_path, output_path)
-    return output_path, False
+    return input_path, False
+
+# ── Smart metadata router ──────────────────────────────────────────────────────
+
+async def add_metadata_smart(file_path, user_id):
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == '.mkv':
+        return await add_metadata_mkv(file_path, user_id)
+    else:
+        return await add_metadata_ffmpeg(file_path, user_id)
 
 # ── Core rename + upload logic ─────────────────────────────────────────────────
 
 async def do_rename(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     download_path = None
-    metadata_path = None
     thumb_path = None
     thumb = None
     msg = None
@@ -269,54 +320,49 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         for placeholder, value in replacements.items():
             format_template = format_template.replace(placeholder, value)
 
-        ext = os.path.splitext(file_name)[1] or ('.mp4' if media_type == 'video' else '.mp3')
+        ext = os.path.splitext(file_name)[1] or '.mkv'
         new_filename = f"{format_template}{ext}"
 
-        # Use unique ID — avoids all special char issues
         unique_id = f"{user_id}_{int(time.time())}"
         download_path = f"downloads/{unique_id}{ext}"
-        metadata_path = f"metadata/{unique_id}{ext}"
 
         os.makedirs("downloads", exist_ok=True)
         os.makedirs("metadata", exist_ok=True)
 
         msg = await message.reply_text("**Downloading... ⬇️**")
 
-        file_path = await client.download_media(
-            message,
-            file_name=download_path,
-            progress=progress_for_pyrogram,
-            progress_args=("Downloading...", msg, time.time())
-        )
+        # Use message.download() — more reliable for forwarded files
+        try:
+            file_path = await message.download(
+                file_name=download_path,
+                progress=progress_for_pyrogram,
+                progress_args=("Downloading...", msg, time.time())
+            )
+        except TypeError:
+            # Fallback if progress args not supported
+            file_path = await message.download(file_name=download_path)
 
         await safe_edit(msg, "**Waiting for download to complete... ⏳**")
         file_path = await wait_for_download(file_path, download_path)
 
-        # Check metadata setting
+        # Metadata
         metadata_enabled = await codeflixbots.get_metadata(user_id)
-
         if metadata_enabled == "On":
-            await safe_edit(msg, "**Processing metadata... 🔧**")
+            await safe_edit(msg, "**Adding metadata... 🔧**")
             try:
-                output_path, metadata_added = await add_metadata_with_fallback(
-                    file_path, metadata_path, user_id
-                )
-                file_path = output_path
+                file_path, metadata_added = await add_metadata_smart(file_path, user_id)
                 if not metadata_added:
-                    # Notify user that metadata fallback was used
                     await message.reply_text(
-                        "⚠️ **Metadata Notice:**\nCould not embed metadata into this file "
-                        "(FFmpeg failed on both attempts).\n"
-                        "File will be uploaded **without metadata** but fully intact."
+                        "⚠️ **Metadata Notice:**\n"
+                        "Could not embed metadata into this file.\n"
+                        "File uploaded **without metadata** but fully intact ✅"
                     )
             except Exception as e:
-                logger.error(f"Metadata failed entirely: {e}")
+                logger.error(f"Metadata error: {e}")
                 await message.reply_text(
-                    f"⚠️ **Metadata failed:** `{str(e)}`\nUploading original file without metadata."
+                    f"⚠️ **Metadata failed:** `{str(e)}`\n"
+                    "Uploading original file without metadata."
                 )
-                file_path = download_path
-        else:
-            logger.info("Metadata is Off — skipping")
 
         await safe_edit(msg, "**Preparing upload... 📤**")
         caption = await codeflixbots.get_caption(user_id) or f"**{new_filename}**"
@@ -363,26 +409,22 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             except:
                 pass
     finally:
-        await cleanup_files(download_path, metadata_path)
+        if download_path and download_path != (locals().get('file_path') or ''):
+            await cleanup_files(download_path)
         if thumb_path and thumb_path != thumb:
             await cleanup_files(thumb_path)
 
 # ── Queue processor ────────────────────────────────────────────────────────────
 
 async def process_queue(client, user_id):
-    """Process files one by one from user's queue"""
     if user_processing.get(user_id, False):
         return
-
     user_processing[user_id] = True
-
     try:
         while user_queues.get(user_id) and not user_cancel.get(user_id, False):
             task = user_queues[user_id].pop(0)
-
             remaining = len(user_queues.get(user_id, []))
             total_done = task['total'] - remaining
-
             try:
                 await task['queue_msg'].edit(
                     f"**⚙️ Processing file {total_done}/{task['total']}**\n"
@@ -390,38 +432,24 @@ async def process_queue(client, user_id):
                 )
             except:
                 pass
-
             await do_rename(
-                client,
-                task['message'],
-                user_id,
-                task['format_template'],
-                task['file_id'],
-                task['file_name'],
-                task['media_type'],
-                task['season'],
-                task['episode'],
-                task['quality']
+                client, task['message'], user_id,
+                task['format_template'], task['file_id'],
+                task['file_name'], task['media_type'],
+                task['season'], task['episode'], task['quality']
             )
-
         if user_cancel.get(user_id, False):
             remaining = len(user_queues.get(user_id, []))
             user_queues[user_id] = []
             user_cancel[user_id] = False
             try:
-                await client.send_message(
-                    user_id,
-                    f"**✅ Queue cancelled. {remaining} file(s) removed.**"
-                )
+                await client.send_message(user_id, f"**✅ Queue cancelled. {remaining} file(s) removed.**")
             except:
                 pass
         else:
             if not user_queues.get(user_id):
                 try:
-                    await client.send_message(
-                        user_id,
-                        "**✅ All files in queue processed!**"
-                    )
+                    await client.send_message(user_id, "**✅ All files in queue processed!**")
                 except:
                     pass
     finally:
@@ -434,21 +462,17 @@ async def queue_status(client, message):
     user_id = message.from_user.id
     queue = user_queues.get(user_id, [])
     is_proc = user_processing.get(user_id, False)
-
     if not queue and not is_proc:
         return await message.reply_text("**📋 Your queue is empty.**")
-
     text = "**📋 Queue Status**\n\n"
     text += f"**Processing:** {'Yes ⚙️' if is_proc else 'No'}\n"
     text += f"**Pending:** {len(queue)} file(s)\n\n"
-
     if queue:
         text += "**Pending files:**\n"
         for i, task in enumerate(queue[:10], 1):
             text += f"`{i}.` {task['file_name'][:45]}\n"
         if len(queue) > 10:
             text += f"_...and {len(queue) - 10} more_"
-
     await message.reply_text(text)
 
 
@@ -457,48 +481,33 @@ async def cancel_queue(client, message):
     user_id = message.from_user.id
     queue = user_queues.get(user_id, [])
     count = len(queue)
-
     if not queue and not user_processing.get(user_id, False):
         return await message.reply_text("**📋 Your queue is already empty.**")
-
     user_cancel[user_id] = True
     user_queues[user_id] = []
-    await message.reply_text(
-        f"**✅ Queue cancelled!**\n{count} pending file(s) removed."
-    )
+    await message.reply_text(f"**✅ Queue cancelled!**\n{count} pending file(s) removed.")
 
 # ── Add to queue helper ────────────────────────────────────────────────────────
 
 async def add_to_queue(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     if user_id not in user_queues:
         user_queues[user_id] = []
-
     total = len(user_queues[user_id]) + 1
     for task in user_queues[user_id]:
         task['total'] = total
-
     queue_msg = await message.reply_text(
         f"**📋 Added to queue!**\n"
         f"Position: `{total}`\n"
         f"File: `{file_name[:50]}`"
     )
-
     task = {
-        'message': message,
-        'user_id': user_id,
-        'format_template': format_template,
-        'file_id': file_id,
-        'file_name': file_name,
-        'media_type': media_type,
-        'season': season,
-        'episode': episode,
-        'quality': quality,
-        'total': total,
-        'queue_msg': queue_msg
+        'message': message, 'user_id': user_id,
+        'format_template': format_template, 'file_id': file_id,
+        'file_name': file_name, 'media_type': media_type,
+        'season': season, 'episode': episode, 'quality': quality,
+        'total': total, 'queue_msg': queue_msg
     }
-
     user_queues[user_id].append(task)
-
     if not user_processing.get(user_id, False):
         asyncio.create_task(process_queue(client, user_id))
 
@@ -510,15 +519,14 @@ async def add_to_queue(client, message, user_id, format_template, file_id, file_
          'view_thumb', 'viewthumb', 'del_thumb', 'delthumb', 'metadata',
          'settitle', 'setauthor', 'setartist', 'setaudio', 'setsubtitle',
          'setvideo', 'help', 'commands', 'donate', 'premium', 'plan',
-         'queue', 'cancel_queue', 'setmedia', 'restart', 'stats', 'broadcast',
-         'tutorial']
+         'queue', 'cancel_queue', 'setmedia', 'restart', 'stats',
+         'broadcast', 'tutorial']
     )
 )
 async def handle_manual_input(client, message):
     user_id = message.from_user.id
     if user_id not in pending_manual_input:
         return
-
     pending = pending_manual_input[user_id]
     field = pending['field']
     data = pending['data']
@@ -537,7 +545,6 @@ async def handle_manual_input(client, message):
             return await message.reply_text(
                 "**Could not detect Quality.**\nType quality e.g. `720p` or `skip`:"
             )
-
     elif field == 'season':
         if user_input.lower() != 'skip':
             data['season'] = user_input
@@ -546,13 +553,11 @@ async def handle_manual_input(client, message):
             return await message.reply_text(
                 "**Could not detect Quality.**\nType quality e.g. `720p` or `skip`:"
             )
-
     elif field == 'quality':
         if user_input.lower() != 'skip':
             data['quality'] = user_input
 
     del pending_manual_input[user_id]
-
     await add_to_queue(
         client, data['message'], data['user_id'],
         data['format_template'], data['file_id'],
@@ -608,15 +613,11 @@ async def auto_rename_files(client, message):
         pending_manual_input[user_id] = {
             'field': missing[0],
             'data': {
-                'message': message,
-                'user_id': user_id,
+                'message': message, 'user_id': user_id,
                 'format_template': format_template,
-                'file_id': file_id,
-                'file_name': file_name,
-                'media_type': media_type,
-                'season': season,
-                'episode': episode,
-                'quality': quality
+                'file_id': file_id, 'file_name': file_name,
+                'media_type': media_type, 'season': season,
+                'episode': episode, 'quality': quality
             }
         }
         field_names = {
