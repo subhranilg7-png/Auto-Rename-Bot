@@ -37,11 +37,14 @@ os.makedirs("metadata", exist_ok=True)
 # ── Regex patterns ─────────────────────────────────────────────────────────────
 
 SEASON_EPISODE_PATTERNS = [
-    (re.compile(r'\[E(\d+)\s*-', re.IGNORECASE), (None, 'episode')),
+    (re.compile(r'S(\d+)\s*-\s*(\d+)', re.IGNORECASE), ('season', 'episode')),               # S1 - 01
+    (re.compile(r'\[(\d+)\s*-', re.IGNORECASE), (None, 'episode')),                           # [04 - Title]
+    (re.compile(r'\[E(\d+)\s*-', re.IGNORECASE), (None, 'episode')),                          # [E04 - Title]
     (re.compile(r'\[S(\d+)[\s-]+(\d+)\]', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'S(\d+)[\s-]*(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'Season\s*(\d+)\s*Episode\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
+    (re.compile(r'Season\s*(\d+)', re.IGNORECASE), ('season', None)),                         # Season 2 (standalone)
     (re.compile(r'\[S(\d+)\]\s*\[?E(\d+)\]?', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'\[S(\d+)\]', re.IGNORECASE), ('season', None)),
     (re.compile(r'\bS(\d+)\b', re.IGNORECASE), ('season', None)),
@@ -600,6 +603,10 @@ async def auto_rename_files(client, message):
 
     season, episode = extract_season_episode(combined)
     quality = extract_quality(combined)
+
+    # If [SO] tag is present and no season detected, default to season 1
+    if not season and re.search(r'\[SO\]', combined, re.IGNORECASE):
+        season = "1"
 
     missing = []
     if not episode:
