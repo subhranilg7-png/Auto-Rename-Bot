@@ -513,7 +513,7 @@ async def handle_manual_input(client, message):
     field = pending['field']
     data = pending['data']
     user_input = message.text.strip()
- 
+
     if field == 'episode':
         if user_input.lower() != 'skip':
             data['episode'] = user_input
@@ -538,7 +538,7 @@ async def handle_manual_input(client, message):
     elif field == 'quality':
         if user_input.lower() != 'skip':
             data['quality'] = user_input
- 
+
     del pending_manual_input[user_id]
     await add_to_queue(
         client, data['message'], data['user_id'],
@@ -546,19 +546,19 @@ async def handle_manual_input(client, message):
         data['file_name'], data['media_type'],
         data.get('season'), data.get('episode'), data.get('quality')
     )
- 
+
 # ── Main file handler ──────────────────────────────────────────────────────────
 
- @Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
+@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def auto_rename_files(client, message):
     user_id = message.from_user.id
- 
+
     format_template = await codeflixbots.get_format_template(user_id)
     if not format_template:
         return await message.reply_text(
             "**Please set a rename format using /autorename**"
         )
- 
+
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name or "file"
@@ -573,20 +573,20 @@ async def auto_rename_files(client, message):
         media_type = "audio"
     else:
         return
- 
+
     if await check_anti_nsfw(file_name, message):
         return
- 
+
     caption_text = message.caption or ""
     combined = f"{file_name} {caption_text}"
- 
+
     season, episode = extract_season_episode(combined)
     quality = extract_quality(combined)
- 
+
     # If [SO] tag is present and no season detected, default to season 1
     if not season and re.search(r'\[SO\]', combined, re.IGNORECASE):
         season = "1"
- 
+
     missing = []
     if not episode:
         missing.append('episode')
@@ -594,7 +594,7 @@ async def auto_rename_files(client, message):
         missing.append('season')
     if not quality:
         missing.append('quality')
- 
+
     if missing:
         pending_manual_input[user_id] = {
             'field': missing[0],
@@ -616,10 +616,9 @@ async def auto_rename_files(client, message):
             f"Please type it (or type `skip`):"
         )
         return
- 
+
     await add_to_queue(
         client, message, user_id, format_template,
         file_id, file_name, media_type,
         season, episode, quality
     )
- 
