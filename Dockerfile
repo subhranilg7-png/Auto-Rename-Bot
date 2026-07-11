@@ -1,8 +1,8 @@
 FROM python:3.10-slim
 
-# Install FFmpeg and mkvtoolnix
+# Install FFmpeg (mkvtoolnix no longer needed — metadata now handled via FFmpeg)
 RUN apt update && \
-    apt install -y ffmpeg mkvtoolnix && \
+    apt install -y ffmpeg && \
     apt clean
 
 WORKDIR /app
