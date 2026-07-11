@@ -151,82 +151,51 @@ async def process_thumbnail(thumb_path):
 def escape_metadata(text):
     return str(text).replace('"', '\\"').replace("'", "\\'")
 
-# ── MKV metadata using mkvpropedit ────────────────────────────────────────────
+# ── Stream probing helper ───────────────────────────────────────────────────
 
-async def add_metadata_mkv(file_path, user_id):
-    """Uses mkvpropedit for MKV — edits in-place, zero corruption risk"""
-    mkvpropedit = shutil.which('mkvpropedit')
-    if not mkvpropedit:
-        logger.warning("mkvpropedit not found — falling back to FFmpeg")
-        return await add_metadata_ffmpeg(file_path, user_id)
+async def probe_streams(input_path):
+    """Returns dict {'video': [idx,...], 'audio': [idx,...], 'subtitle': [idx,...]}
+    where idx is the stream's index *within its own type* (0-based),
+    matching how ffmpeg's -metadata:s:TYPE:N option addresses streams."""
+    ffprobe = shutil.which('ffprobe')
+    result = {'video': [], 'audio': [], 'subtitle': []}
+    if not ffprobe:
+        return result
 
-    title = await codeflixbots.get_title(user_id)
-    video_title = await codeflixbots.get_video(user_id)
-    audio_title = await codeflixbots.get_audio(user_id)
-    subtitle_title = await codeflixbots.get_subtitle(user_id)
-
-    # Try with subtitle track first
     cmd = [
-        mkvpropedit, file_path,
-        '--edit', 'info',
-        '--set', f'title={title}',
-        '--edit', 'track:v1',
-        '--set', f'name={video_title}',
-        '--edit', 'track:a1',
-        '--set', f'name={audio_title}',
-        '--edit', 'track:s1',
-        '--set', f'name={subtitle_title}',
+        ffprobe, '-v', 'error', '-show_entries', 'stream=index,codec_type',
+        '-of', 'csv=p=0', input_path
     ]
     try:
         process = await asyncio.wait_for(
             asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             ),
-            timeout=60
+            timeout=30
         )
-        _, stderr = await process.communicate()
-        if process.returncode == 0:
-            logger.info("MKV metadata added via mkvpropedit")
-            return file_path, True
-    except asyncio.TimeoutError:
-        logger.warning("mkvpropedit timed out")
+        stdout, _ = await process.communicate()
     except Exception as e:
-        logger.warning(f"mkvpropedit error: {e}")
+        logger.warning(f"ffprobe failed: {e}")
+        return result
 
-    # Retry without subtitle track
-    cmd_no_sub = [
-        mkvpropedit, file_path,
-        '--edit', 'info',
-        '--set', f'title={title}',
-        '--edit', 'track:v1',
-        '--set', f'name={video_title}',
-        '--edit', 'track:a1',
-        '--set', f'name={audio_title}',
-    ]
-    try:
-        process2 = await asyncio.wait_for(
-            asyncio.create_subprocess_exec(
-                *cmd_no_sub,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            ),
-            timeout=60
-        )
-        _, stderr2 = await process2.communicate()
-        if process2.returncode == 0:
-            logger.info("MKV metadata added (no subtitle track)")
-            return file_path, True
-    except Exception as e:
-        logger.warning(f"mkvpropedit retry failed: {e}")
+    type_map = {'video': 'video', 'audio': 'audio', 'subtitle': 'subtitle'}
+    for line in stdout.decode(errors='ignore').splitlines():
+        line = line.strip()
+        if not line or ',' not in line:
+            continue
+        _, codec_type = line.split(',', 1)
+        codec_type = codec_type.strip()
+        if codec_type in type_map:
+            key = type_map[codec_type]
+            result[key].append(len(result[key]))  # 0-based index within its type
 
-    return file_path, False
+    return result
 
-# ── FFmpeg fallback for non-MKV ───────────────────────────────────────────────
+# ── FFmpeg metadata (single path for all containers) ───────────────────────
 
 async def add_metadata_ffmpeg(input_path, user_id):
-    """3-level FFmpeg fallback"""
+    """3-level FFmpeg fallback. Applies title metadata to every audio and
+    subtitle stream individually, not just the first one of each type."""
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         return input_path, False
@@ -244,16 +213,24 @@ async def add_metadata_ffmpeg(input_path, user_id):
     audio_title = await codeflixbots.get_audio(user_id)
     subtitle_title = await codeflixbots.get_subtitle(user_id)
 
-    # Level 1
+    streams = await probe_streams(input_path)
+
+    per_stream_args = []
+    for idx in streams['video']:
+        per_stream_args += ['-metadata:s:v:' + str(idx), f'title={escape_metadata(video_title)}']
+    for idx in streams['audio']:
+        per_stream_args += ['-metadata:s:a:' + str(idx), f'title={escape_metadata(audio_title)}']
+    for idx in streams['subtitle']:
+        per_stream_args += ['-metadata:s:s:' + str(idx), f'title={escape_metadata(subtitle_title)}']
+
+    # Level 1 — full stream copy, per-track metadata on every track
     cmd1 = [
         ffmpeg, '-y', '-i', input_path,
         '-map', '0', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy',
         '-metadata', f'title={escape_metadata(title)}',
         '-metadata', f'artist={escape_metadata(artist)}',
         '-metadata', f'author={escape_metadata(author)}',
-        '-metadata:s:v', f'title={escape_metadata(video_title)}',
-        '-metadata:s:a', f'title={escape_metadata(audio_title)}',
-        '-metadata:s:s', f'title={escape_metadata(subtitle_title)}',
+        *per_stream_args,
         output_path
     ]
     try:
@@ -265,18 +242,24 @@ async def add_metadata_ffmpeg(input_path, user_id):
         if p.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             await cleanup_files(input_path)
             return output_path, True
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"FFmpeg metadata level 1 failed: {e}")
 
-    # Level 2
+    # Level 2 — no subtitle stream copy (some containers choke on -c:s copy)
     if os.path.exists(output_path):
         await cleanup_files(output_path)
     cmd2 = [
         ffmpeg, '-y', '-i', input_path,
-        '-map', '0', '-c', 'copy',
+        '-map', '0', '-c:v', 'copy', '-c:a', 'copy',
         '-metadata', f'title={escape_metadata(title)}',
-        output_path
+        '-metadata', f'artist={escape_metadata(artist)}',
+        '-metadata', f'author={escape_metadata(author)}',
     ]
+    for idx in streams['video']:
+        cmd2 += ['-metadata:s:v:' + str(idx), f'title={escape_metadata(video_title)}']
+    for idx in streams['audio']:
+        cmd2 += ['-metadata:s:a:' + str(idx), f'title={escape_metadata(audio_title)}']
+    cmd2 += [output_path]
     try:
         p2 = await asyncio.wait_for(
             asyncio.create_subprocess_exec(*cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE),
@@ -286,8 +269,8 @@ async def add_metadata_ffmpeg(input_path, user_id):
         if p2.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             await cleanup_files(input_path)
             return output_path, True
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"FFmpeg metadata level 2 failed: {e}")
 
     # Level 3 — no metadata
     if os.path.exists(output_path):
@@ -297,11 +280,7 @@ async def add_metadata_ffmpeg(input_path, user_id):
 # ── Smart metadata router ──────────────────────────────────────────────────────
 
 async def add_metadata_smart(file_path, user_id):
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == '.mkv':
-        return await add_metadata_mkv(file_path, user_id)
-    else:
-        return await add_metadata_ffmpeg(file_path, user_id)
+    return await add_metadata_ffmpeg(file_path, user_id)
 
 # ── Core rename + upload logic ─────────────────────────────────────────────────
 
@@ -534,7 +513,7 @@ async def handle_manual_input(client, message):
     field = pending['field']
     data = pending['data']
     user_input = message.text.strip()
-
+ 
     if field == 'episode':
         if user_input.lower() != 'skip':
             data['episode'] = user_input
@@ -559,7 +538,7 @@ async def handle_manual_input(client, message):
     elif field == 'quality':
         if user_input.lower() != 'skip':
             data['quality'] = user_input
-
+ 
     del pending_manual_input[user_id]
     await add_to_queue(
         client, data['message'], data['user_id'],
@@ -567,19 +546,19 @@ async def handle_manual_input(client, message):
         data['file_name'], data['media_type'],
         data.get('season'), data.get('episode'), data.get('quality')
     )
-
+ 
 # ── Main file handler ──────────────────────────────────────────────────────────
 
-@Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
+ @Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def auto_rename_files(client, message):
     user_id = message.from_user.id
-
+ 
     format_template = await codeflixbots.get_format_template(user_id)
     if not format_template:
         return await message.reply_text(
             "**Please set a rename format using /autorename**"
         )
-
+ 
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name or "file"
@@ -594,20 +573,20 @@ async def auto_rename_files(client, message):
         media_type = "audio"
     else:
         return
-
+ 
     if await check_anti_nsfw(file_name, message):
         return
-
+ 
     caption_text = message.caption or ""
     combined = f"{file_name} {caption_text}"
-
+ 
     season, episode = extract_season_episode(combined)
     quality = extract_quality(combined)
-
+ 
     # If [SO] tag is present and no season detected, default to season 1
     if not season and re.search(r'\[SO\]', combined, re.IGNORECASE):
         season = "1"
-
+ 
     missing = []
     if not episode:
         missing.append('episode')
@@ -615,7 +594,7 @@ async def auto_rename_files(client, message):
         missing.append('season')
     if not quality:
         missing.append('quality')
-
+ 
     if missing:
         pending_manual_input[user_id] = {
             'field': missing[0],
@@ -637,9 +616,10 @@ async def auto_rename_files(client, message):
             f"Please type it (or type `skip`):"
         )
         return
-
+ 
     await add_to_queue(
         client, message, user_id, format_template,
         file_id, file_name, media_type,
         season, episode, quality
     )
+ 
