@@ -1,0 +1,8 @@
+{
+  "name": "Auto-Rename-Bot",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "postCreateCommand": "pip install --no-cache-dir -r requirements.txt"
+}
