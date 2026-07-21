@@ -1,5 +1,7 @@
 import os
 import time
+import html
+import shutil
 import asyncio
 import logging
 
@@ -16,7 +18,7 @@ from helper.session_state import auto_post_sessions
 from plugins.channel_admin import admin_filter
 from plugins.file_rename import (
     extract_season_episode, extract_quality, wait_for_download,
-    process_thumbnail, cleanup_files, safe_edit
+    process_thumbnail, cleanup_files, safe_edit, add_metadata_smart
 )
 
 logger = logging.getLogger(__name__)
@@ -44,22 +46,53 @@ def _quality_sort_key(entry):
     return QUALITY_ORDER.get((entry.get('quality') or '').lower(), 99)
 
 
-async def _get_cached_thumb(client, format_doc):
-    path = f"downloads/thumbs/{format_doc['format_id']}.jpg"
-    if os.path.exists(path):
-        return path
-    try:
-        downloaded = await client.download_media(format_doc['thumbnail'], file_name=path)
-        return await process_thumbnail(downloaded)
-    except Exception as e:
-        logger.error(f"Could not cache thumbnail for format {format_doc['format_id']}: {e}")
-        return None
+async def _get_cached_images(client, format_doc):
+    """Returns (raw_path, cropped_path). raw_path is the original, uncropped
+    image — used as the photo attached to Main/Sub channel posts. cropped_path
+    is a 1:1 square version — used as the video/document thumbnail on uploads."""
+    format_id = format_doc['format_id']
+    raw_path = f"downloads/thumbs/{format_id}_raw.jpg"
+    cropped_path = f"downloads/thumbs/{format_id}_crop.jpg"
+
+    if not os.path.exists(raw_path):
+        try:
+            await client.download_media(format_doc['thumbnail'], file_name=raw_path)
+        except Exception as e:
+            logger.error(f"Could not download raw image for format {format_id}: {e}")
+            return None, None
+
+    if not os.path.exists(cropped_path):
+        try:
+            shutil.copyfile(raw_path, cropped_path)
+            await process_thumbnail(cropped_path)  # crops in place to 320x320
+        except Exception as e:
+            logger.error(f"Could not crop thumbnail for format {format_id}: {e}")
+            cropped_path = None
+
+    return (raw_path if os.path.exists(raw_path) else None), cropped_path
 
 
 def _render(template, season, episode):
     return (template
             .replace('{season}', str(season) if season else 'XX')
             .replace('{episode}', str(episode) if episode else 'XX'))
+
+
+def _render_bold(text):
+    """Wraps the whole text in bold, except segments delimited by R<>R...R<>R
+    pairs, which stay normal weight. Escapes HTML special chars throughout
+    since this is sent with parse_mode=HTML."""
+    parts = text.split('R<>R')
+    rendered = ''
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        escaped = html.escape(part)
+        if i % 2 == 0:
+            rendered += f'<b>{escaped}</b>'
+        else:
+            rendered += escaped
+    return rendered
 
 
 # ── /auto_post ───────────────────────────────────────────────────────────────
@@ -298,19 +331,31 @@ async def _flush_group(client, key, group):
     try:
         await client.send_message(user_id, f"**⚙️ Posting S{season or 'XX'}E{episode}...**")
 
-        # 1. Sub channel post (text, admin's own template — may include HTML bold tags)
-        sub_text = _render(fmt['sub_post'], season, episode)
-        await client.send_message(channel_id, sub_text, parse_mode=ParseMode.HTML)
+        raw_image, cropped_thumb = await _get_cached_images(client, fmt)
 
-        # 2. Files in quality order
-        thumb_path = await _get_cached_thumb(client, fmt)
+        # 1. Sub channel post (photo = original uncropped image, caption = bold-rendered text)
+        sub_text = _render_bold(_render(fmt['sub_post'], season, episode))
+        if raw_image:
+            await client.send_photo(channel_id, photo=raw_image, caption=sub_text, parse_mode=ParseMode.HTML)
+        else:
+            await client.send_message(channel_id, sub_text, parse_mode=ParseMode.HTML)
+
+        # 2. Files in quality order (renamed + metadata embedded, same as /autorename)
         for entry in files:
-            await _rename_and_upload(client, entry, fmt, channel_id, season, episode, thumb_path, user_id)
+            await _rename_and_upload(client, entry, fmt, channel_id, season, episode, cropped_thumb, user_id)
 
-        # 3. Main channel post with DOWNLOAD button (primary/invite link to the sub channel)
+        # 3. Sub channel sticker (sticker 2), after the files
+        sub_sticker = await codeflixbots.get_sub_sticker()
+        if sub_sticker:
+            try:
+                await client.send_sticker(channel_id, sub_sticker)
+            except Exception as e:
+                logger.error(f"Could not send sub sticker to {channel_id}: {e}")
+
+        # 4. Main channel post with DOWNLOAD button (primary/invite link to the sub channel)
         channel = await codeflixbots.get_subchannel(channel_id)
         invite_link = channel.get('invite_link') if channel else None
-        main_text = _render(fmt['main_post'], season, episode)
+        main_text = _render_bold(_render(fmt['main_post'], season, episode))
 
         reply_markup = None
         if invite_link:
@@ -318,9 +363,23 @@ async def _flush_group(client, key, group):
                 [[InlineKeyboardButton("DOWNLOAD", url=invite_link)]]
             )
         main_channel_id = await codeflixbots.get_main_channel()
-        await client.send_message(
-            main_channel_id, main_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
-        )
+        if raw_image:
+            await client.send_photo(
+                main_channel_id, photo=raw_image, caption=main_text,
+                parse_mode=ParseMode.HTML, reply_markup=reply_markup
+            )
+        else:
+            await client.send_message(
+                main_channel_id, main_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
+            )
+
+        # 5. Main channel sticker (sticker 1), after the post
+        main_sticker = await codeflixbots.get_main_sticker()
+        if main_sticker:
+            try:
+                await client.send_sticker(main_channel_id, main_sticker)
+            except Exception as e:
+                logger.error(f"Could not send main sticker to {main_channel_id}: {e}")
 
         await client.send_message(
             user_id,
@@ -369,6 +428,18 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
             file_path = await message.download(file_name=download_path)
 
         file_path = await wait_for_download(file_path, download_path)
+
+        # Metadata — same behavior as the personal /autorename flow: only runs
+        # if this admin has metadata turned "On" via /metadata
+        metadata_enabled = await codeflixbots.get_metadata(user_id)
+        if metadata_enabled == "On":
+            await safe_edit(progress_msg, "**🔧 Adding metadata...**")
+            try:
+                file_path, metadata_added = await add_metadata_smart(file_path, user_id)
+                if not metadata_added:
+                    logger.warning(f"Metadata not embedded for {new_filename}, uploading without it.")
+            except Exception as e:
+                logger.error(f"Metadata error for {new_filename}: {e}")
 
         await safe_edit(progress_msg, f"**⬆️ Uploading** `{new_filename[:50]}`...")
         upload_params = {
