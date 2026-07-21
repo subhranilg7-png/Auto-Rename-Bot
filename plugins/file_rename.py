@@ -22,29 +22,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── Queue system ───────────────────────────────────────────────────────────────
 user_queues = {}
 user_processing = {}
 user_cancel = {}
 
-# Pending manual input store
 pending_manual_input = {}
 
-# Create required directories on startup
 os.makedirs("downloads", exist_ok=True)
 os.makedirs("metadata", exist_ok=True)
 
-# ── Regex patterns ─────────────────────────────────────────────────────────────
-
 SEASON_EPISODE_PATTERNS = [
-    (re.compile(r'S(\d+)\s*-\s*(\d+)', re.IGNORECASE), ('season', 'episode')),               # S1 - 01
-    (re.compile(r'\[(\d+)\s*-', re.IGNORECASE), (None, 'episode')),                           # [04 - Title]
-    (re.compile(r'\[E(\d+)\s*-', re.IGNORECASE), (None, 'episode')),                          # [E04 - Title]
+    (re.compile(r'S(\d+)\s*-\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
+    (re.compile(r'\[(\d+)\s*-', re.IGNORECASE), (None, 'episode')),
+    (re.compile(r'\[E(\d+)\s*-', re.IGNORECASE), (None, 'episode')),
     (re.compile(r'\[S(\d+)[\s-]+(\d+)\]', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'S(\d+)(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'S(\d+)[\s-]*(?:E|EP)(\d+)', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'Season\s*(\d+)\s*Episode\s*(\d+)', re.IGNORECASE), ('season', 'episode')),
-    (re.compile(r'Season\s*(\d+)', re.IGNORECASE), ('season', None)),                         # Season 2 (standalone)
+    (re.compile(r'Season\s*(\d+)', re.IGNORECASE), ('season', None)),
     (re.compile(r'\[S(\d+)\]\s*\[?E(\d+)\]?', re.IGNORECASE), ('season', 'episode')),
     (re.compile(r'\[S(\d+)\]', re.IGNORECASE), ('season', None)),
     (re.compile(r'\bS(\d+)\b', re.IGNORECASE), ('season', None)),
@@ -62,8 +57,6 @@ QUALITY_PATTERNS = [
     (re.compile(r'\b(HDRip|HDTV)\b', re.IGNORECASE), lambda m: m.group(1)),
     (re.compile(r'\[(4k|2160p|2k|1440p|1080p|720p|576p|480p)\]', re.IGNORECASE), lambda m: m.group(1)),
 ]
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def extract_season_episode(text):
     if not text:
@@ -140,7 +133,13 @@ async def process_thumbnail(thumb_path):
         return None
     try:
         with Image.open(thumb_path) as img:
-            img = img.convert("RGB").resize((320, 320))
+            img = img.convert("RGB")
+            w, h = img.size
+            side = min(w, h)
+            left = (w - side) // 2
+            top = (h - side) // 2
+            img = img.crop((left, top, left + side, top + side))
+            img = img.resize((320, 320), Image.LANCZOS)
             img.save(thumb_path, "JPEG")
         return thumb_path
     except Exception as e:
@@ -151,12 +150,7 @@ async def process_thumbnail(thumb_path):
 def escape_metadata(text):
     return str(text).replace('"', '\\"').replace("'", "\\'")
 
-# ── Stream probing helper ───────────────────────────────────────────────────
-
 async def probe_streams(input_path):
-    """Returns dict {'video': [idx,...], 'audio': [idx,...], 'subtitle': [idx,...]}
-    where idx is the stream's index *within its own type* (0-based),
-    matching how ffmpeg's -metadata:s:TYPE:N option addresses streams."""
     ffprobe = shutil.which('ffprobe')
     result = {'video': [], 'audio': [], 'subtitle': []}
     if not ffprobe:
@@ -187,15 +181,11 @@ async def probe_streams(input_path):
         codec_type = codec_type.strip()
         if codec_type in type_map:
             key = type_map[codec_type]
-            result[key].append(len(result[key]))  # 0-based index within its type
+            result[key].append(len(result[key]))
 
     return result
 
-# ── FFmpeg metadata (single path for all containers) ───────────────────────
-
 async def add_metadata_ffmpeg(input_path, user_id):
-    """3-level FFmpeg fallback. Applies title metadata to every audio and
-    subtitle stream individually, not just the first one of each type."""
     ffmpeg = shutil.which('ffmpeg')
     if not ffmpeg:
         return input_path, False
@@ -223,7 +213,6 @@ async def add_metadata_ffmpeg(input_path, user_id):
     for idx in streams['subtitle']:
         per_stream_args += ['-metadata:s:s:' + str(idx), f'title={escape_metadata(subtitle_title)}']
 
-    # Level 1 — full stream copy, per-track metadata on every track
     cmd1 = [
         ffmpeg, '-y', '-i', input_path,
         '-map', '0', '-c:v', 'copy', '-c:a', 'copy', '-c:s', 'copy',
@@ -245,7 +234,6 @@ async def add_metadata_ffmpeg(input_path, user_id):
     except Exception as e:
         logger.warning(f"FFmpeg metadata level 1 failed: {e}")
 
-    # Level 2 — no subtitle stream copy (some containers choke on -c:s copy)
     if os.path.exists(output_path):
         await cleanup_files(output_path)
     cmd2 = [
@@ -272,17 +260,12 @@ async def add_metadata_ffmpeg(input_path, user_id):
     except Exception as e:
         logger.warning(f"FFmpeg metadata level 2 failed: {e}")
 
-    # Level 3 — no metadata
     if os.path.exists(output_path):
         await cleanup_files(output_path)
     return input_path, False
 
-# ── Smart metadata router ──────────────────────────────────────────────────────
-
 async def add_metadata_smart(file_path, user_id):
     return await add_metadata_ffmpeg(file_path, user_id)
-
-# ── Core rename + upload logic ─────────────────────────────────────────────────
 
 async def do_rename(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     download_path = None
@@ -313,7 +296,6 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
 
         msg = await message.reply_text("**Downloading... ⬇️**")
 
-        # Use message.download() — more reliable for forwarded files
         try:
             file_path = await message.download(
                 file_name=download_path,
@@ -321,13 +303,11 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
                 progress_args=("Downloading...", msg, time.time())
             )
         except TypeError:
-            # Fallback if progress args not supported
             file_path = await message.download(file_name=download_path)
 
         await safe_edit(msg, "**Waiting for download to complete... ⏳**")
         file_path = await wait_for_download(file_path, download_path)
 
-        # Metadata
         metadata_enabled = await codeflixbots.get_metadata(user_id)
         if metadata_enabled == "On":
             await safe_edit(msg, "**Adding metadata... 🔧**")
@@ -396,8 +376,6 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         if thumb_path and thumb_path != thumb:
             await cleanup_files(thumb_path)
 
-# ── Queue processor ────────────────────────────────────────────────────────────
-
 async def process_queue(client, user_id):
     if user_processing.get(user_id, False):
         return
@@ -437,8 +415,6 @@ async def process_queue(client, user_id):
     finally:
         user_processing[user_id] = False
 
-# ── Queue commands ─────────────────────────────────────────────────────────────
-
 @Client.on_message(filters.private & filters.command('queue'))
 async def queue_status(client, message):
     user_id = message.from_user.id
@@ -469,8 +445,6 @@ async def cancel_queue(client, message):
     user_queues[user_id] = []
     await message.reply_text(f"**✅ Queue cancelled!**\n{count} pending file(s) removed.")
 
-# ── Add to queue helper ────────────────────────────────────────────────────────
-
 async def add_to_queue(client, message, user_id, format_template, file_id, file_name, media_type, season, episode, quality):
     if user_id not in user_queues:
         user_queues[user_id] = []
@@ -492,8 +466,6 @@ async def add_to_queue(client, message, user_id, format_template, file_id, file_
     user_queues[user_id].append(task)
     if not user_processing.get(user_id, False):
         asyncio.create_task(process_queue(client, user_id))
-
-# ── Manual input handler ───────────────────────────────────────────────────────
 
 @Client.on_message(
     filters.private & filters.text & ~filters.command(
@@ -547,15 +519,13 @@ async def handle_manual_input(client, message):
         data.get('season'), data.get('episode'), data.get('quality')
     )
 
-# ── Main file handler ──────────────────────────────────────────────────────────
-
 @Client.on_message(filters.private & (filters.document | filters.video | filters.audio))
 async def auto_rename_files(client, message):
     user_id = message.from_user.id
 
     from helper.session_state import auto_post_sessions
     if user_id in auto_post_sessions:
-        return  # handled by plugins/auto_post.py instead
+        return
 
     format_template = await codeflixbots.get_format_template(user_id)
     if not format_template:
@@ -587,7 +557,6 @@ async def auto_rename_files(client, message):
     season, episode = extract_season_episode(combined)
     quality = extract_quality(combined)
 
-    # If [SO] tag is present and no season detected, default to season 1
     if not season and re.search(r'\[SO\]', combined, re.IGNORECASE):
         season = "1"
 
