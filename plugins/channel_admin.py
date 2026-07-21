@@ -138,6 +138,18 @@ async def _finalize_format(client, message, user_id):
     del admin_state[user_id]
 
 
+# ── /set_stickers ────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.private & filters.command('set_stickers') & admin_filter)
+async def set_stickers_cmd(client, message):
+    admin_state[message.from_user.id] = {
+        'action': 'set_stickers', 'step': 'awaiting_main_sticker', 'data': {}
+    }
+    await message.reply_text(
+        "**Send the sticker to use after every Main channel post** (sticker 1)."
+    )
+
+
 # ── /add_admin, /remove_admin ─────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('add_admin') & owner_filter)
@@ -362,9 +374,10 @@ async def list_channels_cmd(client, message):
 # ── Conversation step handler (text/photo while a state is active) ─────────────
 
 @Client.on_message(
-    filters.private & (filters.text | filters.photo) & admin_filter & ~filters.command([
+    filters.private & (filters.text | filters.photo | filters.sticker) & admin_filter & ~filters.command([
         'add_channel', 'add_format', 'delete_format', 'list_channels', 'add_admin',
-        'remove_admin', 'admins', 'set_main_channel', 'set_save_channel', 'auto_post', 'stop_auto_post'
+        'remove_admin', 'admins', 'set_main_channel', 'set_save_channel', 'set_stickers',
+        'auto_post', 'stop_auto_post'
     ]),
     group=1
 )
@@ -462,3 +475,22 @@ async def channel_conversation_handler(client, message):
             return await message.reply_text("**Please send a short label.**")
         data['label'] = message.text.strip()
         return await _finalize_format(client, message, user_id)
+
+    # ── Steps: set_stickers wizard ───────────────────────────────────────────
+    if step == 'awaiting_main_sticker':
+        if not message.sticker:
+            return await message.reply_text("**Please send a sticker.**")
+        data['main_sticker'] = message.sticker.file_id
+        state['step'] = 'awaiting_sub_sticker'
+        return await message.reply_text(
+            "**Got it. Now send the sticker to use after every Sub channel post/files** (sticker 2)."
+        )
+
+    if step == 'awaiting_sub_sticker':
+        if not message.sticker:
+            return await message.reply_text("**Please send a sticker.**")
+        data['sub_sticker'] = message.sticker.file_id
+        await codeflixbots.set_main_sticker(data['main_sticker'])
+        await codeflixbots.set_sub_sticker(data['sub_sticker'])
+        del admin_state[user_id]
+        return await message.reply_text("**✅ Both stickers saved.**")
