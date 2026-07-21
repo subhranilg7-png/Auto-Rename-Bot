@@ -13,13 +13,40 @@ from config import Config
 from aiohttp import web
 from route import web_server
 import pyrogram.utils
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 import os
 import time
 
 pyrogram.utils.MIN_CHANNEL_ID = -1009147483647
 
 PORT = Config.PORT
+
+BOT_COMMANDS = [
+    BotCommand("start", "Start the bot"),
+    BotCommand("help", "Help menu"),
+    BotCommand("commands", "Show all commands"),
+    BotCommand("autorename", "Set auto rename format"),
+    BotCommand("queue", "View your queue status"),
+    BotCommand("cancel_queue", "Cancel all pending files"),
+    BotCommand("viewthumb", "View your thumbnail"),
+    BotCommand("delthumb", "Delete your thumbnail"),
+    BotCommand("set_caption", "Set custom caption"),
+    BotCommand("see_caption", "View your caption"),
+    BotCommand("del_caption", "Delete your caption"),
+    BotCommand("metadata", "Turn on/off metadata"),
+    BotCommand("set_main_channel", "[Admin] Set the Main channel"),
+    BotCommand("set_save_channel", "[Admin] Set the backup/save channel"),
+    BotCommand("set_stickers", "[Admin] Set Main/Sub channel stickers"),
+    BotCommand("add_channel", "[Admin] Add a sub channel"),
+    BotCommand("add_format", "[Admin] Add a format to a sub channel"),
+    BotCommand("delete_format", "[Admin] Delete a format from a sub channel"),
+    BotCommand("list_channels", "[Admin] List sub channels & formats"),
+    BotCommand("auto_post", "[Admin] Start an auto-post session"),
+    BotCommand("stop_auto_post", "[Admin] End the auto-post session"),
+    BotCommand("add_admin", "[Owner] Add an admin"),
+    BotCommand("remove_admin", "[Owner] Remove an admin"),
+    BotCommand("admins", "List all admins"),
+]
 
 
 class Bot(Client):
@@ -42,6 +69,12 @@ class Bot(Client):
         self.mention = me.mention
         self.username = me.username
         self.uptime = Config.BOT_UPTIME
+
+        try:
+            await self.set_bot_commands(BOT_COMMANDS)
+        except Exception as e:
+            print(f"Failed to set bot commands: {e}")
+
         if Config.WEBHOOK:
             app = web.AppRunner(await web_server())
             await app.setup()
