@@ -329,6 +329,46 @@ class Database:
             logging.error(f"Error getting save channel: {e}")
             return None
 
+    async def set_main_sticker(self, sticker_file_id):
+        try:
+            await self.settings_col.update_one(
+                {"_id": "main_sticker"},
+                {"$set": {"file_id": sticker_file_id}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logging.error(f"Error setting main sticker: {e}")
+            return False
+
+    async def get_main_sticker(self):
+        try:
+            doc = await self.settings_col.find_one({"_id": "main_sticker"})
+            return doc.get("file_id") if doc else None
+        except Exception as e:
+            logging.error(f"Error getting main sticker: {e}")
+            return None
+
+    async def set_sub_sticker(self, sticker_file_id):
+        try:
+            await self.settings_col.update_one(
+                {"_id": "sub_sticker"},
+                {"$set": {"file_id": sticker_file_id}},
+                upsert=True
+            )
+            return True
+        except Exception as e:
+            logging.error(f"Error setting sub sticker: {e}")
+            return False
+
+    async def get_sub_sticker(self):
+        try:
+            doc = await self.settings_col.find_one({"_id": "sub_sticker"})
+            return doc.get("file_id") if doc else None
+        except Exception as e:
+            logging.error(f"Error getting sub sticker: {e}")
+            return None
+
     # ── Sub-channels & formats ──────────────────────────────────────────────────
 
     async def add_subchannel(self, channel_id, title, invite_link, added_by):
