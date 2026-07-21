@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import html
 import shutil
@@ -29,15 +30,8 @@ os.makedirs("downloads/thumbs", exist_ok=True)
 DEBOUNCE_SECONDS = 8
 QUALITY_ORDER = {'480p': 0, '720p': 1, '1080p': 2, '2k': 3, '4k': 4}
 
-# ── Session state ──────────────────────────────────────────────────────────────
-# auto_post_sessions lives in helper/session_state.py (shared with file_rename.py
-# so the personal /autorename handler can skip files while a session is active)
-# awaiting_channel_selection[user_id] = True while the reply keyboard is shown
 awaiting_channel_selection = {}
-# pending_groups[(user_id, channel_id, season, episode)] = {'files': [...], 'timer_task': Task, 'channel_id':..., 'format':...}
 pending_groups = {}
-# user_job_queues[user_id] = asyncio.Queue() — completed groups wait here so only
-# one channel's post+files+main-post job runs at a time per admin
 user_job_queues = {}
 user_worker_running = {}
 
@@ -47,9 +41,6 @@ def _quality_sort_key(entry):
 
 
 async def _get_cached_images(client, format_doc):
-    """Returns (raw_path, cropped_path). raw_path is the original, uncropped
-    image — used as the photo attached to Main/Sub channel posts. cropped_path
-    is a 1:1 square version — used as the video/document thumbnail on uploads."""
     format_id = format_doc['format_id']
     raw_path = f"downloads/thumbs/{format_id}_raw.jpg"
     cropped_path = f"downloads/thumbs/{format_id}_crop.jpg"
@@ -64,7 +55,7 @@ async def _get_cached_images(client, format_doc):
     if not os.path.exists(cropped_path):
         try:
             shutil.copyfile(raw_path, cropped_path)
-            await process_thumbnail(cropped_path)  # crops in place to 320x320
+            await process_thumbnail(cropped_path)
         except Exception as e:
             logger.error(f"Could not crop thumbnail for format {format_id}: {e}")
             cropped_path = None
@@ -79,23 +70,21 @@ def _render(template, season, episode):
 
 
 def _render_bold(text):
-    """Wraps the whole text in bold, except segments delimited by R<>R...R<>R
-    pairs, which stay normal weight. Escapes HTML special chars throughout
-    since this is sent with parse_mode=HTML."""
-    parts = text.split('R<>R')
     rendered = ''
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        escaped = html.escape(part)
-        if i % 2 == 0:
-            rendered += f'<b>{escaped}</b>'
-        else:
-            rendered += escaped
+    last_end = 0
+    for match in re.finditer(r'R<(.*?)>R', text, flags=re.DOTALL):
+        bold_part = text[last_end:match.start()]
+        if bold_part:
+            rendered += f'<b>{html.escape(bold_part)}</b>'
+        normal_part = match.group(1)
+        if normal_part:
+            rendered += html.escape(normal_part)
+        last_end = match.end()
+    tail = text[last_end:]
+    if tail:
+        rendered += f'<b>{html.escape(tail)}</b>'
     return rendered
 
-
-# ── /auto_post ───────────────────────────────────────────────────────────────
 
 @Client.on_message(filters.private & filters.command('auto_post') & admin_filter)
 async def auto_post_cmd(client, message):
@@ -129,8 +118,6 @@ async def stop_auto_post_cmd(client, message):
     awaiting_channel_selection.pop(user_id, None)
     had_session = auto_post_sessions.pop(user_id, None)
 
-    # Flush any pending groups belonging to this user right away (queued, so
-    # it still waits its turn behind any job already running)
     keys = [k for k in pending_groups if k[0] == user_id]
     for key in keys:
         group = pending_groups.pop(key)
@@ -143,8 +130,6 @@ async def stop_auto_post_cmd(client, message):
         reply_markup=ReplyKeyboardRemove()
     )
 
-
-# ── Channel selection (text reply from the keyboard) ────────────────────────
 
 @Client.on_message(filters.private & filters.text & admin_filter, group=2)
 async def channel_selection_handler(client, message):
@@ -210,8 +195,6 @@ async def _start_session(client, message, user_id, channel, fmt):
     )
 
 
-# ── Incoming files while a session is active ────────────────────────────────
-
 @Client.on_message(
     filters.private & (filters.document | filters.video | filters.audio) & admin_filter,
     group=2
@@ -220,7 +203,7 @@ async def auto_post_file_handler(client, message):
     user_id = message.from_user.id
     session = auto_post_sessions.get(user_id)
     if not session:
-        return  # not in an auto-post session — let other handlers process it
+        return
 
     if message.document:
         file_id = message.document.file_id
@@ -292,7 +275,7 @@ async def _enqueue_job(client, key, group):
     should_notify = user_job_queues[user_id].qsize() > 0 or user_worker_running.get(user_id, False)
     need_worker = not user_worker_running.get(user_id, False)
     if need_worker:
-        user_worker_running[user_id] = True  # claim synchronously, before any await below
+        user_worker_running[user_id] = True
 
     await user_job_queues[user_id].put((key, group))
 
@@ -333,18 +316,15 @@ async def _flush_group(client, key, group):
 
         raw_image, cropped_thumb = await _get_cached_images(client, fmt)
 
-        # 1. Sub channel post (photo = original uncropped image, caption = bold-rendered text)
         sub_text = _render_bold(_render(fmt['sub_post'], season, episode))
         if raw_image:
             await client.send_photo(channel_id, photo=raw_image, caption=sub_text, parse_mode=ParseMode.HTML)
         else:
             await client.send_message(channel_id, sub_text, parse_mode=ParseMode.HTML)
 
-        # 2. Files in quality order (renamed + metadata embedded, same as /autorename)
         for entry in files:
             await _rename_and_upload(client, entry, fmt, channel_id, season, episode, cropped_thumb, user_id)
 
-        # 3. Sub channel sticker (sticker 2), after the files
         sub_sticker = await codeflixbots.get_sub_sticker()
         if sub_sticker:
             try:
@@ -352,7 +332,6 @@ async def _flush_group(client, key, group):
             except Exception as e:
                 logger.error(f"Could not send sub sticker to {channel_id}: {e}")
 
-        # 4. Main channel post with DOWNLOAD button (primary/invite link to the sub channel)
         channel = await codeflixbots.get_subchannel(channel_id)
         invite_link = channel.get('invite_link') if channel else None
         main_text = _render_bold(_render(fmt['main_post'], season, episode))
@@ -373,7 +352,6 @@ async def _flush_group(client, key, group):
                 main_channel_id, main_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
             )
 
-        # 5. Main channel sticker (sticker 1), after the post
         main_sticker = await codeflixbots.get_main_sticker()
         if main_sticker:
             try:
@@ -429,8 +407,6 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
 
         file_path = await wait_for_download(file_path, download_path)
 
-        # Metadata — same behavior as the personal /autorename flow: only runs
-        # if this admin has metadata turned "On" via /metadata
         metadata_enabled = await codeflixbots.get_metadata(user_id)
         if metadata_enabled == "On":
             await safe_edit(progress_msg, "**🔧 Adding metadata...**")
