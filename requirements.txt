@@ -1,0 +1,9 @@
+wzgram
+dnspython
+motor
+hachoir
+Pillow
+aiohttp
+pytz
+humanize
+ffmpeg-python
