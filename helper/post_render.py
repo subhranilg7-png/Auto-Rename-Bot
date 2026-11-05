@@ -27,6 +27,46 @@ def render_bold(text):
     return rendered
 
 
+from html.parser import HTMLParser
+
+_ALLOWED_TAGS = {'b', 'strong', 'i', 'em', 'u', 'ins', 's', 'strike', 'del', 'a',
+                 'code', 'pre', 'tg-spoiler', 'blockquote'}
+
+
+class _TagCheck(HTMLParser):
+    """Collects whether the text uses Telegram HTML tags and whether they are properly nested."""
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.stack, self.tags, self.ok = [], 0, True
+
+    def handle_starttag(self, tag, attrs):
+        if tag not in _ALLOWED_TAGS:
+            self.ok = False
+            return
+        self.tags += 1
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag not in _ALLOWED_TAGS or not self.stack or self.stack[-1] != tag:
+            self.ok = False
+            return
+        self.stack.pop()
+
+
+def looks_like_html(text):
+    """True when the text contains Telegram HTML tags and they are balanced."""
+    checker = _TagCheck()
+    try:
+        checker.feed(text)
+        checker.close()
+    except Exception:
+        return False
+    return checker.tags > 0 and checker.ok and not checker.stack
+
+
+_BARE_AMP = re.compile(r'&(?!(?:amp|lt|gt|quot|#\d+);)')
+
+
 def render_post(fmt, which, season, episode):
     """
     which = 'main' | 'sub'. Formats saved with the new panel keep your Telegram styling
@@ -36,6 +76,10 @@ def render_post(fmt, which, season, episode):
     filled = fill(raw, season, episode)
     if fmt.get('main_html' if which == 'main' else 'sub_html'):
         return filled
+    if looks_like_html(filled):
+        # Older formats were typed with <b>...</b> (the old wizard said HTML was supported, but
+        # the text was escaped, so the tags showed up literally). Render them as the HTML they are.
+        return _BARE_AMP.sub('&amp;', filled)
     return render_bold(filled)
 
 

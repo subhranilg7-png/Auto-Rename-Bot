@@ -165,7 +165,13 @@ async def view_format(client, msg, cid, fid, note=None):
     fmt = await db.get_format(cid, fid) if ch else None
     if not fmt:
         return await view_channels(client, msg, "That format no longer exists.")
-    styled = "styled" if fmt.get('main_html') or fmt.get('sub_html') else "classic (bold + R&lt;…&gt;R)"
+    from helper.post_render import looks_like_html
+    if fmt.get('main_html') or fmt.get('sub_html'):
+        styled = "styled"
+    elif looks_like_html(fmt['main_post']) or looks_like_html(fmt['sub_post']):
+        styled = "HTML tags (older format)"
+    else:
+        styled = "classic (bold + R&lt;…&gt;R)"
     text = (f"<b>🎞 {_e(fmt['label'])}</b> — {_e(ch.get('title', str(cid)))}\n\n"
             f"<b>Rename format:</b>\n{pre(fmt['rename_format'], 200)}"
             f"<b>Main post:</b>\n{pre(fmt['main_post'])}"

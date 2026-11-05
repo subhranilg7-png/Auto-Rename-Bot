@@ -21,6 +21,7 @@ from helper.cancel import (
     TaskCancelled, new_task, drop_task, raise_if_cancelled, request_cancel
 )
 from plugins.channel_admin import admin_filter
+from plugins.file_rename import stored_name_mismatch
 from plugins.file_rename import (
     extract_season_episode, extract_quality, wait_for_download,
     process_thumbnail, cleanup_files, safe_edit, add_metadata_smart
@@ -35,9 +36,11 @@ DEFAULT_WINDOW_SECONDS = 15   # how long to wait after the last file of an episo
 QUALITY_ORDER = {'480p': 0, '720p': 1, '1080p': 2, '2k': 3, '4k': 4}
 
 pending_groups = {}
+_name_warned = []   # the 'Telegram renamed the file' notice is sent once per run
 user_jobs = {}            # user_id -> [(key, group)] waiting to be posted
 user_worker_running = {}
 _running_group = {}       # user_id -> group_id currently being posted
+_running_info = {}        # user_id -> {'gid','season','episode','channel','group'} for /queue
 
 
 def _norm(value):
@@ -446,6 +449,46 @@ async def _user_queue_worker(client, user_id):
         user_worker_running[user_id] = False
 
 
+def _summ(key, group):
+    files = group.get('files', [])
+    return {'gid': group['group_id'], 'season': group.get('season'), 'episode': key[3],
+            'channel': group.get('channel_title', ''), 'files': len(files),
+            'done': sum(1 for f in files if f.get('done'))}
+
+
+def autopost_snapshot(user_id):
+    """What /queue shows for auto-post: the post in progress, posts waiting, episodes still collecting."""
+    running = None
+    info = _running_info.get(user_id)
+    if info:
+        g = info['group']
+        running = {'gid': info['gid'], 'season': info['season'], 'episode': info['episode'],
+                   'channel': info['channel'], 'files': len(g.get('files', [])),
+                   'done': sum(1 for f in g.get('files', []) if f.get('done'))}
+    waiting = [_summ(k, g) for k, g in sorted(user_jobs.get(user_id, []), key=_job_sort_key)]
+    collecting = [_summ(k, g) for k, g in pending_groups.items() if k[0] == user_id]
+    session = auto_post_sessions.get(user_id)
+    return {'running': running, 'waiting': waiting, 'collecting': collecting,
+            'session': (f"{session['channel_title']} — {session['format']['label']}" if session else None)}
+
+
+async def remove_group(user_id, gid):
+    """Drop one episode post that hasn't started (collecting or waiting). Returns True if found."""
+    for key in [k for k, g in pending_groups.items() if k[0] == user_id and g['group_id'] == gid]:
+        group = pending_groups.pop(key)
+        if group.get('timer_task'):
+            group['timer_task'].cancel()
+        await codeflixbots.ap_group_delete(gid)
+        return True
+    jobs = user_jobs.get(user_id, [])
+    for job in jobs:
+        if job[1]['group_id'] == gid:
+            jobs.remove(job)
+            await codeflixbots.ap_group_delete(gid)
+            return True
+    return False
+
+
 async def cancel_all_posts(user_id):
     """Used by /cancel_queue: drop collecting groups, queued posts, and stop the one in progress."""
     cancelled = 0
@@ -470,6 +513,8 @@ async def _flush_group(client, key, group):
     files = sorted(group['files'], key=_quality_sort_key)
     new_task(user_id, group_id)          # one cancel id for the whole episode post
     _running_group[user_id] = group_id
+    _running_info[user_id] = {'gid': group_id, 'season': season, 'episode': episode,
+                              'channel': group['channel_title'], 'group': group}
 
     async def mark(stage):
         stages[stage] = True
@@ -586,6 +631,7 @@ async def _flush_group(client, key, group):
             pass
     finally:
         _running_group.pop(user_id, None)
+        _running_info.pop(user_id, None)
         drop_task(group_id)
 
 
@@ -666,6 +712,17 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
             sent = True
         if sent is None:
             raise_if_cancelled(task_id)   # a stopped upload returns None
+        stored = stored_name_mismatch(sent, media_type, new_filename)
+        if stored and not _name_warned:
+            _name_warned.append(True)
+            try:
+                await client.send_message(
+                    user_id,
+                    f"⚠️ **Telegram saved the file name as** `{stored}`\n**instead of** `{new_filename}`\n"
+                    "(shown once per run)"
+                )
+            except Exception:
+                pass
 
         try:
             await progress_msg.delete()

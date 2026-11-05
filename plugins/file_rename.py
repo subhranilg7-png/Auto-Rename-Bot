@@ -266,6 +266,19 @@ async def get_user_thumb(client, user_id):
 
     return cropped_path if os.path.exists(cropped_path) else None
 
+def stored_name_mismatch(sent, media_type, wanted):
+    """If Telegram stored a different file name than we asked for, return the stored one."""
+    try:
+        media = getattr(sent, media_type, None)
+        stored = getattr(media, 'file_name', None)
+        if stored and stored != wanted:
+            logger.warning(f"Telegram stored the file name as {stored!r} instead of {wanted!r}")
+            return stored
+    except Exception:
+        pass
+    return None
+
+
 def build_caption(template, new_filename, file_path):
     """Fill {filename} {filesize} {duration} in /set_caption text (they were sent literally before)."""
     if not template:
@@ -530,6 +543,11 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         if sent is None:
             raise_if_cancelled(task_id)   # a stopped upload returns None
         status = 'ok'
+        stored = stored_name_mismatch(sent, media_type, new_filename)
+        if stored:
+            await message.reply_text(
+                f"⚠️ **Telegram saved the file name as** `{stored}`\n**instead of** `{new_filename}`"
+            )
 
         try:
             await msg.delete()
@@ -698,24 +716,66 @@ async def cancel_everything(user_id):
 
 
 def _queue_view(user_id):
+    try:
+        from plugins.auto_post import autopost_snapshot
+        ap = autopost_snapshot(user_id)
+    except Exception as e:
+        logger.error(f"Could not read the auto-post queue: {e}")
+        ap = {'running': None, 'waiting': [], 'collecting': [], 'session': None}
+
     queue = user_queues.get(user_id, [])
     is_proc = user_processing.get(user_id, False)
-    if not queue and not is_proc:
-        return "**📋 Your queue is empty.**", None
-    text = "**📋 Queue**\n\n"
-    text += f"**Working on a file:** {'yes ⚙️' if is_proc else 'no'}\n"
-    text += f"**Waiting:** {len(queue)} file(s)\n"
+    has_ap = bool(ap['running'] or ap['waiting'] or ap['collecting'])
+    if not queue and not is_proc and not has_ap:
+        extra = f"\n🟢 Auto-post session: {ap['session']}" if ap['session'] else ""
+        return "**📋 Your queue is empty.**" + extra, None
+
+    def ep(item):
+        return f"S{item['season'] or 'XX'}E{item['episode']}"
+
+    def nfiles(n):
+        return f"{n} file" + ("" if n == 1 else "s")
+
+    text = "**📋 Queue**\n"
     rows = []
-    for i, task in enumerate(queue[:8], 1):
-        text += f"`{i}.` {task['file_name'][:45]}\n"
-        if task.get('db_id') is not None:
-            rows.append([InlineKeyboardButton(f"❌ {i}. {task['file_name'][:35]}", callback_data=f"qc:{task['db_id']}")])
-    if len(queue) > 8:
-        text += f"_...and {len(queue) - 8} more_\n"
-    tid = current_for(user_id)
     controls = []
-    if tid and is_proc:
-        controls.append(InlineKeyboardButton("⏹ Stop current", callback_data=f"cancel_{tid}"))
+
+    if has_ap or ap['session']:
+        text += "\n**🔁 Auto-post**"
+        if ap['session']:
+            text += f" — {ap['session']}"
+        text += "\n"
+        if ap['running']:
+            r = ap['running']
+            text += f"⚙️ Posting now: `{ep(r)}` → {r['channel']} ({r['done']}/{r['files']} files)\n"
+            controls.append(InlineKeyboardButton("⏹ Stop current post", callback_data=f"cancel_{r['gid']}"))
+        if ap['waiting']:
+            text += f"⏳ Waiting ({len(ap['waiting'])}), in posting order:\n"
+            for n, w in enumerate(ap['waiting'][:8], 1):
+                text += f"`{n}.` {ep(w)} · {w['files']} file(s) → {w['channel']}\n"
+                rows.append([InlineKeyboardButton(f"❌ {ep(w)} ({nfiles(w['files'])})", callback_data=f"qa:{w['gid']}")])
+            if len(ap['waiting']) > 8:
+                text += f"_...and {len(ap['waiting']) - 8} more_\n"
+        if ap['collecting']:
+            text += f"📥 Collecting qualities ({len(ap['collecting'])}) — posts start after you stop sending files:\n"
+            for c in ap['collecting'][:8]:
+                text += f"• {ep(c)} · {c['files']} file(s) so far\n"
+                rows.append([InlineKeyboardButton(f"❌ {ep(c)} ({nfiles(c['files'])})", callback_data=f"qa:{c['gid']}")])
+
+    if queue or is_proc:
+        text += "\n**📂 Rename queue**\n"
+        text += f"Working on a file: {'yes ⚙️' if is_proc else 'no'}\n"
+        text += f"Waiting: {len(queue)} file(s)\n"
+        for i, task in enumerate(queue[:8], 1):
+            text += f"`{i}.` {task['file_name'][:45]}\n"
+            if task.get('db_id') is not None:
+                rows.append([InlineKeyboardButton(f"❌ {i}. {task['file_name'][:35]}", callback_data=f"qc:{task['db_id']}")])
+        if len(queue) > 8:
+            text += f"_...and {len(queue) - 8} more_\n"
+        tid = current_for(user_id)
+        if tid and is_proc:
+            controls.append(InlineKeyboardButton("⏹ Stop current file", callback_data=f"cancel_{tid}"))
+
     controls.append(InlineKeyboardButton("🗑 Cancel all", callback_data="qca"))
     rows.append(controls)
     rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="qrf")])
@@ -728,13 +788,19 @@ async def queue_status(client, message):
     await message.reply_text(text, reply_markup=markup)
 
 
-@Client.on_callback_query(filters.regex(r"^(qrf|qca|qc:[0-9a-f]{24})$"), group=-1)
+@Client.on_callback_query(filters.regex(r"^(qrf|qca|qc:[0-9a-f]{24}|qa:[0-9a-f]{10})$"), group=-1)
 async def queue_buttons(client, callback_query):
     user_id = callback_query.from_user.id
     data = callback_query.data
     if data == 'qca':
         await cancel_everything(user_id)
         await callback_query.answer("Queue cancelled")
+    elif data.startswith('qa:'):
+        from plugins.auto_post import remove_group
+        if await remove_group(user_id, data[3:]):
+            await callback_query.answer("Removed from the auto-post queue")
+        else:
+            await callback_query.answer("It already started or finished.")
     elif data.startswith('qc:'):
         db_id = data[3:]
         queue = user_queues.get(user_id, [])
