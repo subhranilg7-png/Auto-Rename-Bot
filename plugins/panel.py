@@ -84,6 +84,8 @@ async def view_dashboard(client, msg, uid):
         fmt = await db.get_format(cid, fid) if ch else None
         if ch and fmt:
             rows.append([btn(f"⚡ {ch.get('title', cid)} · {fmt['label']}"[:60], f"apfmt_{cid}_{fid}")])
+    from config import Config
+    lines += ["", f"<i>build {Config.BUILD}</i>"]
     rows += [
         [btn("📡 Channels", "cpl"), btn("🧩 Patterns", "ptl")],
         [btn("⚙️ Settings", "pset"), btn("📊 Status", "pstat")],

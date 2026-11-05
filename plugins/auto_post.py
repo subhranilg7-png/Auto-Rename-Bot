@@ -17,6 +17,7 @@ from pyrogram.types import (
 from helper.database import codeflixbots
 from helper.utils import progress_for_pyrogram
 from helper.session_state import auto_post_sessions
+from helper.post_render import render_post, render_bold, fill
 from helper.cancel import (
     TaskCancelled, new_task, drop_task, raise_if_cancelled, request_cancel
 )
@@ -93,27 +94,21 @@ async def _get_cached_images(client, format_doc):
     return (raw_path if os.path.exists(raw_path) else None), cropped_path
 
 
-def _render(template, season, episode):
-    return (template
-            .replace('{season}', str(season) if season else 'XX')
-            .replace('{episode}', str(episode) if episode else 'XX'))
-
-
-def _render_bold(text):
-    rendered = ''
-    last_end = 0
-    for match in re.finditer(r'R<(.*?)>R', text, flags=re.DOTALL):
-        bold_part = text[last_end:match.start()]
-        if bold_part:
-            rendered += f'<b>{html.escape(bold_part)}</b>'
-        normal_part = match.group(1)
-        if normal_part:
-            rendered += html.escape(normal_part)
-        last_end = match.end()
-    tail = text[last_end:]
-    if tail:
-        rendered += f'<b>{html.escape(tail)}</b>'
-    return rendered
+async def _send_post(send, fmt, which, season, episode):
+    """
+    Send a Main/Sub post using the shared renderer (helper/post_render.py), so posting and
+    👁 Preview always look the same. If Telegram rejects the formatting, retry once with the
+    safe escaped version instead of failing the whole post.
+    """
+    text = render_post(fmt, which, season, episode)
+    try:
+        return await send(text)
+    except Exception as e:
+        if not any(w in str(e).upper() for w in ('ENTIT', 'PARSE', 'TAG')):
+            raise
+        logger.warning(f"Telegram rejected the {which} post formatting ({e}); sending the escaped version")
+        raw = fmt['main_post'] if which == 'main' else fmt['sub_post']
+        return await send(render_bold(fill(raw, season, episode)))
 
 
 async def _channel_picker_view():
@@ -541,11 +536,11 @@ async def _flush_group(client, key, group):
 
         if not stages.get('sub_intro'):
             raise_if_cancelled(group_id)
-            sub_text = _render_bold(_render(fmt['sub_post'], season, episode))
-            if raw_image:
-                await client.send_photo(channel_id, photo=raw_image, caption=sub_text, parse_mode=ParseMode.HTML)
-            else:
-                await client.send_message(channel_id, sub_text, parse_mode=ParseMode.HTML)
+            async def send_sub(text):
+                if raw_image:
+                    return await client.send_photo(channel_id, photo=raw_image, caption=text, parse_mode=ParseMode.HTML)
+                return await client.send_message(channel_id, text, parse_mode=ParseMode.HTML)
+            await _send_post(send_sub, fmt, 'sub', season, episode)
             await mark('sub_intro')
 
         uploaded = sum(1 for e in files if e.get('done'))
@@ -577,22 +572,22 @@ async def _flush_group(client, key, group):
             raise_if_cancelled(group_id)
             channel = await codeflixbots.get_subchannel(channel_id)
             invite_link = channel.get('invite_link') if channel else None
-            main_text = _render_bold(_render(fmt['main_post'], season, episode))
-
             reply_markup = None
             if invite_link:
                 reply_markup = InlineKeyboardMarkup(
                     [[InlineKeyboardButton("DOWNLOAD", url=invite_link)]]
                 )
-            if raw_image:
-                await client.send_photo(
-                    main_channel_id, photo=raw_image, caption=main_text,
-                    parse_mode=ParseMode.HTML, reply_markup=reply_markup
+
+            async def send_main(text):
+                if raw_image:
+                    return await client.send_photo(
+                        main_channel_id, photo=raw_image, caption=text,
+                        parse_mode=ParseMode.HTML, reply_markup=reply_markup
+                    )
+                return await client.send_message(
+                    main_channel_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
                 )
-            else:
-                await client.send_message(
-                    main_channel_id, main_text, parse_mode=ParseMode.HTML, reply_markup=reply_markup
-                )
+            await _send_post(send_main, fmt, 'main', season, episode)
             await mark('main_post')
 
         if not stages.get('main_sticker'):

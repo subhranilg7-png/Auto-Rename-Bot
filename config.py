@@ -4,6 +4,7 @@ id_pattern = re.compile(r'^.\d+$')
 
 
 class Config(object):
+    BUILD = "panel-v4"   # shown in /panel so you can tell which version is running
     # pyro client config
     API_ID    = int(os.environ.get("API_ID", "0") or 0)
     API_HASH  = os.environ.get("API_HASH", "").strip()
