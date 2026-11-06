@@ -129,13 +129,13 @@ async def commands_end_prompts(client, message):
         admin_state.pop(message.from_user.id, None)
 
 
-async def _back_to_settings(client, state):
+async def _back_to_settings(client, state, uid=None):
     """If the prompt was opened from the panel's Settings screen, return to it."""
     panel_msg = state.get('msg')
     if panel_msg:
         try:
             from plugins.panel import view_settings
-            await view_settings(client, panel_msg, note="✅ Saved.")
+            await view_settings(client, panel_msg, note="✅ Saved.", uid=uid)
         except Exception as e:
             logger.error(f"Could not return to settings: {e}")
 
@@ -192,14 +192,14 @@ async def channel_conversation_handler(client, message):
             await codeflixbots.set_main_channel(chat_id)
             del admin_state[user_id]
             if state.get('msg'):
-                return await _back_to_settings(client, state)
+                return await _back_to_settings(client, state, user_id)
             return await message.reply_text(f"**✅ Main channel set to:** {chat.title}")
 
         if state['action'] == 'set_save_channel':
             await codeflixbots.set_save_channel(chat_id)
             del admin_state[user_id]
             if state.get('msg'):
-                return await _back_to_settings(client, state)
+                return await _back_to_settings(client, state, user_id)
             return await message.reply_text(f"**✅ Save channel set to:** {chat.title}")
         return
 
@@ -221,5 +221,5 @@ async def channel_conversation_handler(client, message):
         await codeflixbots.set_sub_sticker(data['sub_sticker'])
         del admin_state[user_id]
         if state.get('msg'):
-            return await _back_to_settings(client, state)
+            return await _back_to_settings(client, state, user_id)
         return await message.reply_text("**✅ Both stickers saved.**")

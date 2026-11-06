@@ -22,6 +22,7 @@ from helper.cancel import (
     TaskCancelled, new_task, drop_task, raise_if_cancelled, request_cancel
 )
 from plugins.channel_admin import admin_filter
+from helper.transfer import download_with_retries, upload_with_retries
 from plugins.file_rename import stored_name_mismatch
 from plugins.file_rename import (
     extract_season_episode, extract_quality, wait_for_download,
@@ -600,11 +601,21 @@ async def _flush_group(client, key, group):
             await mark('main_sticker')
 
         await codeflixbots.ap_group_delete(group_id)
-        await client.send_message(
-            user_id,
-            f"**✅ Done — S{season or 'XX'}E{episode} posted to {group['channel_title']} "
-            f"({uploaded} file(s)) and the Main channel.**"
-        )
+        failed = [e['file_name'] for e in files if not e.get('done')]
+        if failed:
+            await client.send_message(
+                user_id,
+                f"**⚠️ Posted S{season or 'XX'}E{episode} to {group['channel_title']} and the Main channel, "
+                f"but {len(failed)} of {len(files)} file(s) failed:**\n"
+                + "\n".join(f"• `{n[:60]}`" for n in failed[:10])
+                + "\n\nIf you send them again, the bot will make a new post for that episode."
+            )
+        else:
+            await client.send_message(
+                user_id,
+                f"**✅ Done — S{season or 'XX'}E{episode} posted to {group['channel_title']} "
+                f"({uploaded} file(s)) and the Main channel.**"
+            )
     except TaskCancelled:
         await codeflixbots.ap_group_delete(group_id)
         main_note = "was already sent" if stages.get('main_post') else "was not sent"
@@ -663,21 +674,14 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
             user_id, f"**⬇️ Downloading** `{file_name[:50]}`...", reply_markup=cancel_markup
         )
 
-        try:
-            file_path = await message.download(
-                file_name=download_path,
-                progress=progress_for_pyrogram,
-                progress_args=("Downloading...", progress_msg, time.time(), client, task_id)
-            )
-        except TypeError:
-            file_path = await message.download(file_name=download_path)
+        file_path = await download_with_retries(client, message, download_path, task_id, progress_msg)
 
-        raise_if_cancelled(task_id)   # a stopped download returns None
+        raise_if_cancelled(task_id)
         file_path = await wait_for_download(file_path, download_path)
 
         metadata_enabled = await codeflixbots.get_metadata(user_id)
         if metadata_enabled == "On":
-            await safe_edit(progress_msg, "**🔧 Adding metadata...**")
+            await safe_edit(progress_msg, "**🔧 Adding metadata...**", task_id)
             try:
                 file_path, metadata_added = await add_metadata_smart(file_path, user_id, task_id)
                 if not metadata_added:
@@ -687,7 +691,7 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
             except Exception as e:
                 logger.error(f"Metadata error for {new_filename}: {e}")
 
-        await safe_edit(progress_msg, f"**⬆️ Uploading** `{new_filename[:50]}`...")
+        await safe_edit(progress_msg, f"**⬆️ Uploading** `{new_filename[:50]}`...", task_id)
         upload_params = {
             'chat_id': channel_id,
             'caption': f"**{new_filename}**",
@@ -697,14 +701,19 @@ async def _rename_and_upload(client, entry, fmt, channel_id, season, episode, th
         }
 
         raise_if_cancelled(task_id)
-        if media_type == "document":
-            sent = await client.send_document(document=file_path, file_name=new_filename, **upload_params)
-        elif media_type == "video":
-            sent = await client.send_video(video=file_path, file_name=new_filename, **upload_params)
-        elif media_type == "audio":
-            sent = await client.send_audio(audio=file_path, file_name=new_filename, **upload_params)
-        else:
-            sent = True
+
+        async def do_send():
+            params = dict(upload_params)
+            params['progress_args'] = ("Uploading...", progress_msg, time.time(), client, task_id)
+            if media_type == "document":
+                return await client.send_document(document=file_path, file_name=new_filename, **params)
+            if media_type == "video":
+                return await client.send_video(video=file_path, file_name=new_filename, **params)
+            if media_type == "audio":
+                return await client.send_audio(audio=file_path, file_name=new_filename, **params)
+            return True
+
+        sent = await upload_with_retries(do_send, task_id, progress_msg)
         if sent is None:
             raise_if_cancelled(task_id)   # a stopped upload returns None
         stored = stored_name_mismatch(sent, media_type, new_filename)

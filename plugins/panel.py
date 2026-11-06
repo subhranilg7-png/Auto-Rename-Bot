@@ -555,7 +555,7 @@ async def goto(client, msg, uid, code):
     if head == 'ptl':
         return await view_patterns(client, msg)
     if head == 'pset':
-        return await view_settings(client, msg)
+        return await view_settings(client, msg, uid=uid)
     return await view_dashboard(client, msg, uid)
 
 
@@ -1057,23 +1057,40 @@ async def _chat_label(client, chat_id):
         return f"<code>{chat_id}</code>"
 
 
-async def view_settings(client, msg, note=None):
+async def view_settings(client, msg, note=None, uid=None):
     import plugins.auto_post as ap
     window = await db.get_autopost_window(ap.DEFAULT_WINDOW_SECONDS)
     main, save = await db.get_main_channel(), await db.get_save_channel()
     stickers = '✅' if (await db.get_main_sticker() and await db.get_sub_sticker()) else '⚠️ not set'
+    import helper.transfer as transfer
+    from config import Config
+    stall = transfer.STALL_SECONDS
+    running_mt = getattr(client, 'max_concurrent_transmissions', None)
+    saved_mt = await db.get_max_transmissions(running_mt)
+    mt_line = f"{running_mt}"
+    needs_restart = saved_mt != running_mt
+    if needs_restart:
+        mt_line += f" → <b>{saved_mt}</b> ⚠️ applies after a restart"
     text = ("<b>⚙️ Settings</b>\n\n"
             f"<b>Main channel:</b> {await _chat_label(client, main)}\n"
             f"<b>Save channel (backups):</b> {await _chat_label(client, save)}\n"
             f"<b>Stickers:</b> {stickers}\n"
-            f"<b>Grouping window:</b> {window}s  <i>(how long to wait for more qualities of an episode)</i>"
+            f"<b>Grouping window:</b> {window}s  <i>(how long to wait for more qualities of an episode)</i>\n"
+            f"<b>Stall timeout:</b> {stall}s  <i>(a download/upload with no data for this long is retried)</i>\n"
+            f"<b>Parallel chunks:</b> {mt_line}  <i>(lower = steadier, higher = faster)</i>"
             + (f"\n\n{note}" if note else ""))
     win_row = [btn(("✅ " if window == s else "") + f"{s}s", f"pw:{s}") for s in (10, 15, 30, 60)]
+    stall_row = [btn(("✅ " if stall == s else "") + f"{s}s", f"ps_stall:{s}") for s in (60, 120, 180, 300)]
+    mt_row = [btn(("✅ " if saved_mt == n else "") + str(n), f"ps_mt:{n}") for n in (2, 4, 6, 8)]
     rows = [[btn("📢 Main channel", "psm"), btn("💾 Save channel", "pss")],
             [btn("🎭 Stickers", "pst")],
             win_row,
-            [btn("📤 Back up all formats", "pbk"), btn("♻️ Restore from backup", "prs")],
-            [btn("⬅️ Back", "pd")]]
+            stall_row,
+            mt_row]
+    if needs_restart and (uid is not None and uid in Config.ADMIN):
+        rows.append([btn("🔄 Restart now to apply", "ps_restart")])
+    rows += [[btn("📤 Back up all formats", "pbk"), btn("♻️ Restore from backup", "prs")],
+             [btn("⬅️ Back", "pd")]]
     await show(msg, text, rows)
 
 
@@ -1083,7 +1100,7 @@ async def cb_settings(client, cq):
         return
     admin_state.pop(cq.from_user.id, None)
     await cq.answer()
-    await view_settings(client, cq.message)
+    await view_settings(client, cq.message, uid=cq.from_user.id)
 
 
 @cb(r"^pw:(\d+)$")
@@ -1092,7 +1109,7 @@ async def cb_window(client, cq):
         return
     await db.set_autopost_window(int(cq.matches[0].group(1)))
     await cq.answer("Saved")
-    await view_settings(client, cq.message)
+    await view_settings(client, cq.message, uid=cq.from_user.id)
 
 
 @cb(r"^(psm|pss)$")
@@ -1111,7 +1128,7 @@ async def cb_set_channel(client, cq):
 async def cb_set_cancel(client, cq):
     admin_state.pop(cq.from_user.id, None)
     await cq.answer("Cancelled")
-    await view_settings(client, cq.message)
+    await view_settings(client, cq.message, uid=cq.from_user.id)
 
 
 @cb(r"^pst$")
@@ -1136,7 +1153,7 @@ async def cb_backup_all(client, cq):
         for fmt in ch.get('formats', []):
             if not fmt.get('backup_msg_id') and await backup.sync_format(client, ch, fmt):
                 done += 1
-    await view_settings(client, cq.message, note=f"✅ Backed up {done} format(s) that had no backup post.")
+    await view_settings(client, cq.message, note=f"✅ Backed up {done} format(s) that had no backup post.", uid=cq.from_user.id)
 
 
 async def run_restore(client, uid):
@@ -1153,13 +1170,62 @@ async def cb_restore(client, cq):
         return
     await cq.answer("Scanning the Save channel…")
     note = await run_restore(client, cq.from_user.id)
-    await view_settings(client, cq.message, note=note)
+    await view_settings(client, cq.message, note=note, uid=cq.from_user.id)
 
 
 @Client.on_message(filters.private & filters.command('restore_formats') & admin_filter)
 async def restore_cmd(client, message):
     msg = await message.reply_text("⏳ Scanning the Save channel…")
     await show(msg, await run_restore(client, message.from_user.id))
+
+
+@cb(r"^ps_stall:(\d+)$")
+async def cb_stall(client, cq):
+    if not await _admin_ok(cq):
+        return
+    import helper.transfer as transfer
+    seconds = int(cq.matches[0].group(1))
+    await db.set_transfer_stall(seconds)
+    transfer.STALL_SECONDS = seconds          # takes effect on the next transfer, no restart
+    await cq.answer("Saved — applies to the next file")
+    await view_settings(client, cq.message, uid=cq.from_user.id)
+
+
+@cb(r"^ps_mt:(\d+)$")
+async def cb_mt(client, cq):
+    if not await _admin_ok(cq):
+        return
+    await db.set_max_transmissions(int(cq.matches[0].group(1)))
+    await cq.answer("Saved — applies after a restart")
+    await view_settings(client, cq.message, uid=cq.from_user.id)
+
+
+async def _restart(client):
+    import os, sys, asyncio
+    await client.stop()
+    await asyncio.sleep(2)
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
+
+@cb(r"^ps_restart$")
+async def cb_restart(client, cq):
+    from config import Config
+    if cq.from_user.id not in Config.ADMIN:
+        return await cq.answer("Only the owner can restart the bot.", show_alert=True)
+    await cq.answer()
+    await show(cq.message, "<b>🔄 Restart the bot?</b>\n\nFiles being processed right now are stopped. "
+                           "Waiting files and unfinished auto-posts are saved and continue after the restart.",
+               [[btn("✅ Yes, restart", "ps_restart_yes"), btn("✖ Cancel", "pset")]])
+
+
+@cb(r"^ps_restart_yes$")
+async def cb_restart_yes(client, cq):
+    from config import Config
+    if cq.from_user.id not in Config.ADMIN:
+        return await cq.answer("Only the owner can restart the bot.", show_alert=True)
+    await cq.answer("Restarting…")
+    await show(cq.message, "<b>🔄 Restarting…</b>\n\nSend /panel again in a few seconds.")
+    await _restart(client)
 
 
 # ═══ Patterns ═══════════════════════════════════════════════════════════════════

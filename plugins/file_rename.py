@@ -15,6 +15,7 @@ from plugins.antinsfw import check_anti_nsfw
 from helper.utils import progress_for_pyrogram, humanbytes, convert
 from helper.database import codeflixbots
 from helper import patterns as custom_patterns
+from helper.transfer import download_with_retries, upload_with_retries
 from helper.cancel import (
     TaskCancelled, new_task, drop_task, is_cancelled, raise_if_cancelled,
     set_proc, request_cancel, set_current, current_for, get_task
@@ -167,9 +168,16 @@ def explain_detection(text):
     return {'season': season, 'episode': episode, 'quality': quality, 'source': source}
 
 
-async def safe_edit(msg, text):
+async def safe_edit(msg, text, task_id=None):
+    """Edit a status message; with task_id the Cancel button stays on it."""
     try:
-        await msg.edit(text)
+        if task_id:
+            await msg.edit_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("• ᴄᴀɴᴄᴇʟ •", callback_data=f"cancel_{task_id}")]])
+            )
+        else:
+            await msg.edit(text)
     except Exception:
         pass
 
@@ -476,22 +484,15 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("• ᴄᴀɴᴄᴇʟ •", callback_data=f"cancel_{task_id}")]])
         )
 
-        try:
-            file_path = await message.download(
-                file_name=download_path,
-                progress=progress_for_pyrogram,
-                progress_args=("Downloading...", msg, time.time(), client, task_id)
-            )
-        except TypeError:
-            file_path = await message.download(file_name=download_path)
+        file_path = await download_with_retries(client, message, download_path, task_id, msg)
 
-        raise_if_cancelled(task_id)   # a stopped download returns None
-        await safe_edit(msg, "**Waiting for download to complete... ⏳**")
+        raise_if_cancelled(task_id)
+        await safe_edit(msg, "**Waiting for download to complete... ⏳**", task_id)
         file_path = await wait_for_download(file_path, download_path)
 
         metadata_enabled = await codeflixbots.get_metadata(user_id)
         if metadata_enabled == "On":
-            await safe_edit(msg, "**Adding metadata... 🔧**")
+            await safe_edit(msg, "**Adding metadata... 🔧**", task_id)
             try:
                 file_path, metadata_added = await add_metadata_smart(file_path, user_id, task_id)
                 if not metadata_added:
@@ -509,7 +510,7 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
                     "Uploading original file without metadata."
                 )
 
-        await safe_edit(msg, "**Preparing upload... 📤**")
+        await safe_edit(msg, "**Preparing upload... 📤**", task_id)
         caption = build_caption(await codeflixbots.get_caption(user_id), new_filename, file_path)
         thumb_path = await get_user_thumb(client, user_id)  # cached, never deleted here
 
@@ -521,7 +522,7 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
             except:
                 thumb_path = None
 
-        await safe_edit(msg, "**Uploading... ⬆️**")
+        await safe_edit(msg, "**Uploading... ⬆️**", task_id)
 
         upload_params = {
             'chat_id': message.chat.id,
@@ -532,14 +533,19 @@ async def do_rename(client, message, user_id, format_template, file_id, file_nam
         }
 
         raise_if_cancelled(task_id)
-        if media_type == "document":
-            sent = await client.send_document(document=file_path, file_name=new_filename, **upload_params)
-        elif media_type == "video":
-            sent = await client.send_video(video=file_path, file_name=new_filename, **upload_params)
-        elif media_type == "audio":
-            sent = await client.send_audio(audio=file_path, file_name=new_filename, **upload_params)
-        else:
-            sent = True
+
+        async def do_send():
+            params = dict(upload_params)
+            params['progress_args'] = ("Uploading...", msg, time.time(), client, task_id)
+            if media_type == "document":
+                return await client.send_document(document=file_path, file_name=new_filename, **params)
+            if media_type == "video":
+                return await client.send_video(video=file_path, file_name=new_filename, **params)
+            if media_type == "audio":
+                return await client.send_audio(audio=file_path, file_name=new_filename, **params)
+            return True
+
+        sent = await upload_with_retries(do_send, task_id, msg)
         if sent is None:
             raise_if_cancelled(task_id)   # a stopped upload returns None
         status = 'ok'
@@ -954,6 +960,26 @@ async def auto_rename_files(client, message):
 
     from helper.session_state import auto_post_sessions
     if user_id in auto_post_sessions:
+        return
+
+    # A setup prompt (add channel / format, edit a post, caption ...) is waiting for an answer:
+    # a file sent now is not a rename job. Tell the user once, then ignore further files.
+    prompt_state = None
+    try:
+        from plugins.channel_admin import admin_state
+        prompt_state = admin_state.get(user_id)
+        if not prompt_state:
+            from plugins.settings_panel import user_state
+            prompt_state = user_state.get(user_id)
+    except Exception as e:
+        logger.warning(f"Could not check for an open prompt: {e}")
+    if prompt_state:
+        if not prompt_state.get('file_hint'):
+            prompt_state['file_hint'] = True
+            await message.reply_text(
+                "📌 **I'm waiting for your answer to the setup question, so I ignored this file.**\n"
+                "Finish it or tap **Cancel**, then send the file again."
+            )
         return
 
     format_template = await codeflixbots.get_format_template(user_id)

@@ -8,9 +8,10 @@ import re
 
 async def progress_for_pyrogram(current, total, ud_type, message, start, client=None, task_id=None):
     # Cancel check runs on every chunk, before the 5-second display throttle below.
-    if task_id and client is not None:
-        from helper.cancel import is_cancelled
-        if is_cancelled(task_id):
+    if task_id:
+        from helper.cancel import is_cancelled, touch
+        touch(task_id)
+        if client is not None and is_cancelled(task_id):
             client.stop_transmission()
 
     now = time.time()

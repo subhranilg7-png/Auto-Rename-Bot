@@ -716,4 +716,55 @@ class Database:
             return False
 
 
+    # ── Transfer tuning saved from the Settings screen ──────────────────────────
+
+    async def get_transfer_stall(self, default=120):
+        try:
+            doc = await self.settings_col.find_one({"_id": "transfer_stall"})
+            return int(doc["value"]) if doc and doc.get("value") else default
+        except Exception as e:
+            logging.error(f"Error getting transfer stall timeout: {e}")
+            return default
+
+    async def set_transfer_stall(self, seconds):
+        try:
+            await self.settings_col.update_one({"_id": "transfer_stall"}, {"$set": {"value": int(seconds)}}, upsert=True)
+            return True
+        except Exception as e:
+            logging.error(f"Error saving transfer stall timeout: {e}")
+            return False
+
+    async def get_max_transmissions(self, default=None):
+        try:
+            doc = await self.settings_col.find_one({"_id": "max_transmissions"})
+            return int(doc["value"]) if doc and doc.get("value") else default
+        except Exception as e:
+            logging.error(f"Error getting max transmissions: {e}")
+            return default
+
+    async def set_max_transmissions(self, value):
+        try:
+            await self.settings_col.update_one({"_id": "max_transmissions"}, {"$set": {"value": int(value)}}, upsert=True)
+            return True
+        except Exception as e:
+            logging.error(f"Error saving max transmissions: {e}")
+            return False
+
+
 codeflixbots = Database(Config.DB_URL, Config.DB_NAME)
+
+
+def read_setting_sync(key):
+    """
+    Read one saved setting before the bot's event loop exists (the Telegram client is created
+    with max_concurrent_transmissions at startup). Returns the saved value or None.
+    """
+    try:
+        from pymongo import MongoClient
+        client = MongoClient(Config.DB_URL, serverSelectionTimeoutMS=3000)
+        doc = client[Config.DB_NAME]["settings"].find_one({"_id": key})
+        client.close()
+        return int(doc["value"]) if doc and doc.get("value") else None
+    except Exception as e:
+        logging.warning(f"Could not read saved setting {key}: {e}")
+        return None

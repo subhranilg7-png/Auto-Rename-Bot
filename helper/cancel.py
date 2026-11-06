@@ -6,11 +6,16 @@ task id. The progress message's Cancel button carries `cancel_<id>`; the
 progress callback checks the flag on every chunk and calls
 client.stop_transmission(); a running ffmpeg process is killed directly.
 """
+import time
 import uuid
 
 
 class TaskCancelled(Exception):
     """Raised inside a pipeline when the user pressed Cancel."""
+
+
+class TransferStalled(Exception):
+    """A download/upload made no progress for too long."""
 
 
 _tasks = {}          # task_id -> {'user_id': int, 'cancelled': bool, 'proc': process|None}
@@ -19,8 +24,20 @@ _user_current = {}   # user_id -> task_id of the normal-rename file in progress
 
 def new_task(user_id, task_id=None):
     task_id = task_id or uuid.uuid4().hex[:10]
-    _tasks[task_id] = {'user_id': user_id, 'cancelled': False, 'proc': None}
+    _tasks[task_id] = {'user_id': user_id, 'cancelled': False, 'proc': None, 'last': time.time()}
     return task_id
+
+
+def touch(task_id):
+    """Called on every progress chunk — proves the transfer is alive."""
+    task = _tasks.get(task_id)
+    if task is not None:
+        task['last'] = time.time()
+
+
+def last_activity(task_id):
+    task = _tasks.get(task_id)
+    return task['last'] if task else time.time()
 
 
 def drop_task(task_id):

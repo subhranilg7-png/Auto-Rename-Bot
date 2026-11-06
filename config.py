@@ -4,7 +4,11 @@ id_pattern = re.compile(r'^.\d+$')
 
 
 class Config(object):
-    BUILD = "panel-v4"   # shown in /panel so you can tell which version is running
+    BUILD = "panel-v6"   # shown in /panel so you can tell which version is running
+    # Parallel file chunks per transfer. wzgram defaults to 16, which made Telegram answer with
+    # FLOOD_WAIT_X on uploads and time out on big downloads. 4 is much steadier; raise it
+    # (e.g. 8) in your environment if your connection stays stable.
+    MAX_TRANSMISSIONS = int(os.environ.get("MAX_TRANSMISSIONS", "4") or 4)
     # pyro client config
     API_ID    = int(os.environ.get("API_ID", "0") or 0)
     API_HASH  = os.environ.get("API_HASH", "").strip()

@@ -40,6 +40,13 @@ def _menu(commands):
 
 
 
+def _saved_transmissions():
+    """The value chosen in Admin panel -> Settings wins over the environment variable."""
+    from helper.database import read_setting_sync
+    saved = read_setting_sync("max_transmissions")
+    return saved if saved else Config.MAX_TRANSMISSIONS
+
+
 class Bot(Client):
 
     def __init__(self):
@@ -51,6 +58,7 @@ class Bot(Client):
             workers=200,
             plugins={"root": "plugins"},
             sleep_threshold=15,
+            max_concurrent_transmissions=_saved_transmissions(),
         )
         self.start_time = time.time()
 
@@ -58,6 +66,8 @@ class Bot(Client):
         await super().start(*args, **kwargs)
         from helper.database import codeflixbots
         await codeflixbots.ping()
+        import helper.transfer as _transfer
+        _transfer.STALL_SECONDS = await codeflixbots.get_transfer_stall(_transfer.STALL_SECONDS)
         me = await self.get_me()
         self.mention = me.mention
         self.username = me.username
